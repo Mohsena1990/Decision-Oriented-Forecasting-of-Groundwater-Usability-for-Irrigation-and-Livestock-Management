@@ -1,0 +1,447 @@
+# =============================================================================
+# GROUNDWATER QUALITY FORECASTING FRAMEWORK - MAIN CONFIGURATION
+# Target: Journal of Environmental Management (JEM)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# DATA PATHS
+# -----------------------------------------------------------------------------
+data:
+  base_dir: "C:/Users/Ilani/OneDrive/Desktop/water/archive"
+  files:
+    2018: "ground_water_quality_2018_post.csv"
+    2019: "ground_water_quality_2019_post.csv"
+    2020: "ground_water_quality_2020_post.csv"
+
+  # Location matching for transitions
+  location_keys:
+    - district
+    - mandal
+    - village
+    - lat_gis
+    - long_gis
+
+# -----------------------------------------------------------------------------
+# OUTPUT PATHS
+# -----------------------------------------------------------------------------
+output:
+  base_dir: "outputs"
+  paper_outputs: "outputs/paper_outputs"
+  figures: "outputs/paper_outputs/figures"
+  tables: "outputs/paper_outputs/tables"
+  models: "outputs/models"
+  logs: "outputs/logs"
+  checkpoints: "outputs/checkpoints"
+
+# -----------------------------------------------------------------------------
+# DATA QUALITY SETTINGS
+# -----------------------------------------------------------------------------
+data_quality:
+  # Schema expectations
+  expected_columns:
+    - sno
+    - district
+    - mandal
+    - village
+    - lat_gis
+    - long_gis
+    - gwl
+    - season
+    - pH
+    - EC
+    - TDS
+    - CO3
+    - HCO3
+    - Cl
+    - F
+    - NO3
+    - SO4
+    - Na
+    - K
+    - Ca
+    - Mg
+    - TH
+    - SAR
+    - Classification
+    - RSC
+    - Classification_RSC
+
+  # Missingness thresholds
+  high_missing_threshold: 0.30  # Flag columns with >30% missing
+  drop_missing_threshold: 0.80  # Drop columns with >80% missing
+
+  # Outlier detection
+  outlier_method: "iqr"  # "iqr" or "zscore"
+  iqr_multiplier: 1.5
+  zscore_threshold: 3.0
+
+  # Range checks (physical constraints)
+  range_checks:
+    pH: [0, 14]
+    lat_gis: [8, 37]  # India latitude range
+    long_gis: [68, 97]  # India longitude range
+    TDS: [0, 50000]
+    EC: [0, 60000]
+    SAR: [0, 100]
+
+  # Cleaning actions
+  cleaning:
+    drop_empty_columns: true
+    resolve_label_typos: true
+    handle_rare_classes: "merge"  # "merge" to Other or "drop"
+    rare_class_threshold: 5  # Minimum samples per class
+
+# -----------------------------------------------------------------------------
+# LABEL CONFIGURATION
+# -----------------------------------------------------------------------------
+labels:
+  target_column: "Classification"
+  secondary_column: "Classification_RSC"  # For additional analysis
+
+  # Label typo resolution mapping
+  typo_mapping:
+    "O.G": "OG"
+    "O.G.": "OG"
+    " C2S1": "C2S1"
+    "C2S1 ": "C2S1"
+
+  # Ordinal encoding for C and S components
+  # Classification format: C{1-4}S{1-4}
+  c_order: [1, 2, 3, 4]  # C1=excellent to C4=very high salinity
+  s_order: [1, 2, 3, 4]  # S1=excellent to S4=very high sodium
+
+  # High-risk class definition (for severity metrics)
+  high_risk_classes:
+    - "C4S1"
+    - "C4S2"
+    - "C4S3"
+    - "C4S4"
+    - "C3S3"
+    - "C3S4"
+
+  # Ordinal distance weights
+  ordinal_weights:
+    c_weight: 1.0
+    s_weight: 1.0
+
+# -----------------------------------------------------------------------------
+# PREPROCESSING CONFIGURATION
+# -----------------------------------------------------------------------------
+preprocessing:
+  # Numeric features
+  numeric_features:
+    - gwl
+    - pH
+    - EC
+    - TDS
+    - CO3
+    - HCO3
+    - Cl
+    - F
+    - NO3
+    - SO4
+    - Na
+    - K
+    - Ca
+    - Mg
+    - TH
+    - SAR
+    - RSC
+
+  # Categorical features
+  categorical_features:
+    - district
+    - mandal
+    - village
+
+  # Spatial features (used for embedding or grouping)
+  spatial_features:
+    - lat_gis
+    - long_gis
+
+  # Imputation strategy
+  imputation:
+    numeric_strategy: "median"
+    categorical_strategy: "most_frequent"
+
+  # Scaling (for deep models)
+  scaling:
+    method: "standard"  # "standard", "minmax", "robust"
+    fit_on_train_only: true
+
+  # Outlier handling
+  outlier_handling:
+    method: "winsorize"  # "winsorize", "clip", "none"
+    lower_percentile: 0.01
+    upper_percentile: 0.99
+    fit_on_train_only: true
+
+# -----------------------------------------------------------------------------
+# IMBALANCE HANDLING
+# -----------------------------------------------------------------------------
+imbalance:
+  strategy: "class_weights"  # "class_weights", "smote", "none"
+
+  # Class weights options
+  class_weights:
+    method: "balanced"  # "balanced", "custom"
+
+  # SMOTE options (if used)
+  smote:
+    k_neighbors: 5
+    sampling_strategy: "auto"
+
+# -----------------------------------------------------------------------------
+# CROSS-VALIDATION & EVALUATION
+# -----------------------------------------------------------------------------
+evaluation:
+  # Primary split: temporal forward
+  temporal_split:
+    train_transitions: ["2018_2019"]  # 2018 -> 2019
+    test_transitions: ["2019_2020"]   # 2019 -> 2020
+
+  # Secondary CV within training (for hyperparameter optimization)
+  inner_cv:
+    method: "stratified_kfold"
+    n_splits: 5
+    shuffle: true
+    random_state: 42
+
+  # Optional grouping for robustness
+  group_by: null  # "district" for grouped CV
+
+  # Bootstrap CI settings
+  bootstrap:
+    n_iterations: 1000
+    confidence_level: 0.95
+    random_state: 42
+
+# -----------------------------------------------------------------------------
+# FEATURE SELECTION
+# -----------------------------------------------------------------------------
+feature_selection:
+  # Mode: "wrapper" (PSO-GWO) or "filter" (warm start)
+  mode: "wrapper"
+
+  # Filter-based warm start (if enabled)
+  filter:
+    enabled: true
+    method: "mutual_info"  # "mutual_info", "anova", "tree_importance"
+    top_k: 15  # Initialize swarm near top-k features
+
+  # Parsimony penalty
+  parsimony:
+    penalty_weight: 0.01  # Weight for number of features in objective
+
+# -----------------------------------------------------------------------------
+# MODEL CONFIGURATIONS
+# -----------------------------------------------------------------------------
+models:
+  # CatBoost
+  catboost:
+    enabled: true
+    params:
+      iterations: [100, 500, 1000]
+      depth: [4, 6, 8, 10]
+      learning_rate: [0.01, 0.05, 0.1, 0.2]
+      l2_leaf_reg: [1, 3, 5, 10]
+      border_count: [32, 64, 128]
+      cat_features: auto  # Will be set based on categorical_features
+    fixed_params:
+      loss_function: "MultiClass"
+      eval_metric: "MultiClass"
+      random_seed: 42
+      verbose: false
+      use_best_model: true
+      early_stopping_rounds: 50
+
+  # LightGBM
+  lightgbm:
+    enabled: true
+    params:
+      n_estimators: [100, 500, 1000]
+      max_depth: [4, 6, 8, 10]
+      learning_rate: [0.01, 0.05, 0.1, 0.2]
+      num_leaves: [31, 63, 127]
+      min_child_samples: [10, 20, 50]
+      reg_alpha: [0, 0.1, 1]
+      reg_lambda: [0, 0.1, 1]
+    fixed_params:
+      objective: "multiclass"
+      metric: "multi_logloss"
+      boosting_type: "gbdt"
+      random_state: 42
+      verbose: -1
+      force_col_wise: true
+
+  # GRU
+  gru:
+    enabled: true
+    params:
+      hidden_size: [32, 64, 128]
+      num_layers: [1, 2]
+      dropout: [0.1, 0.2, 0.3]
+      learning_rate: [0.001, 0.005, 0.01]
+      batch_size: [32, 64]
+      embedding_dim: [8, 16, 32]
+    fixed_params:
+      max_epochs: 200
+      patience: 20
+      random_seed: 42
+
+  # LSTM
+  lstm:
+    enabled: true
+    params:
+      hidden_size: [32, 64, 128]
+      num_layers: [1, 2]
+      dropout: [0.1, 0.2, 0.3]
+      learning_rate: [0.001, 0.005, 0.01]
+      batch_size: [32, 64]
+      embedding_dim: [8, 16, 32]
+    fixed_params:
+      max_epochs: 200
+      patience: 20
+      random_seed: 42
+
+# -----------------------------------------------------------------------------
+# OPTIMIZATION (PSO-GWO)
+# -----------------------------------------------------------------------------
+optimization:
+  # Algorithm settings
+  algorithm: "pso_gwo"
+
+  # Population and iterations
+  population_size: 30
+  max_iterations: 50
+
+  # PSO parameters
+  pso:
+    w: 0.7  # Inertia weight
+    c1: 1.5  # Cognitive parameter
+    c2: 1.5  # Social parameter
+
+  # GWO parameters
+  gwo:
+    alpha_decay: true
+    a_start: 2.0
+    a_end: 0.0
+
+  # Hybrid weight (0=pure PSO, 1=pure GWO)
+  hybrid_weight: 0.5
+
+  # Multi-objective settings
+  pareto:
+    archive_size: 100
+    use_crowding_distance: true
+
+  # Random seed
+  random_state: 42
+
+# -----------------------------------------------------------------------------
+# OBJECTIVES
+# -----------------------------------------------------------------------------
+objectives:
+  # Objective 1: Ordinal distance error (minimize)
+  ordinal_distance:
+    enabled: true
+    weight: 1.0
+    aggregation: "mean"  # "mean" or "sum"
+
+  # Objective 2: Severe-risk FNR (minimize)
+  severe_fnr:
+    enabled: true
+    weight: 1.5  # Higher weight for safety
+
+  # Objective 3: 1 - MacroF1 (minimize)
+  macro_f1:
+    enabled: true
+    weight: 1.0
+
+  # Objective 4: Complexity/parsimony (minimize)
+  complexity:
+    enabled: true
+    weight: 0.5
+    components:
+      n_features: true
+      model_size: false  # Optional
+
+# -----------------------------------------------------------------------------
+# MCDM (VIKOR)
+# -----------------------------------------------------------------------------
+mcdm:
+  method: "vikor"
+
+  vikor:
+    v: 0.5  # Weight of group utility vs individual regret
+
+  # Objective weights for final ranking
+  objective_weights:
+    ordinal_distance: 0.25
+    severe_fnr: 0.35
+    macro_f1: 0.25
+    complexity: 0.15
+
+# -----------------------------------------------------------------------------
+# EXPLAINABILITY (SHAP)
+# -----------------------------------------------------------------------------
+explainability:
+  # TreeSHAP for tree models
+  tree_shap:
+    enabled: true
+    max_samples: 1000  # Limit samples for speed
+
+  # Surrogate SHAP for deep models
+  surrogate:
+    enabled: true
+    surrogate_model: "lightgbm"
+    min_fidelity_r2: 0.85
+    min_fidelity_corr: 0.90
+
+  # Output settings
+  top_k_features: 10
+  focus_on_high_risk: true
+
+# -----------------------------------------------------------------------------
+# SCENARIO SIMULATION
+# -----------------------------------------------------------------------------
+scenarios:
+  # TDS scenarios
+  tds:
+    perturbations: [0.1, 0.2, 0.3]  # +10%, +20%, +30%
+    direction: "increase"
+
+  # SAR scenarios
+  sar:
+    perturbations: [0.1, 0.2]  # +10%, +20%
+    direction: "increase"
+
+  # RSC threshold scenarios
+  rsc:
+    thresholds: [1.25, 2.5]
+    shift_type: "threshold_crossing"
+
+  # Combined scenarios
+  combined:
+    enabled: true
+    scenarios:
+      - name: "high_salinity"
+        tds: 0.2
+        sar: 0.1
+
+# -----------------------------------------------------------------------------
+# REPRODUCIBILITY
+# -----------------------------------------------------------------------------
+reproducibility:
+  global_seed: 42
+  deterministic: true
+  log_all_configs: true
+
+# -----------------------------------------------------------------------------
+# LOGGING
+# -----------------------------------------------------------------------------
+logging:
+  level: "INFO"
+  file_logging: true
+  console_logging: true
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
