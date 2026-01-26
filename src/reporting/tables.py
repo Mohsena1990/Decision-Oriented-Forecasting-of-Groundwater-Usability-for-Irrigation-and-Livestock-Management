@@ -133,30 +133,59 @@ class TableGenerator:
 
     def t4_best_configurations(
         self,
-        model_results: Dict[str, Dict[str, Any]]
+        model_results: Dict[str, Any]
     ) -> Tuple[pd.DataFrame, Path]:
         """
         T4: Best configuration per model + objective values.
+
+        Args:
+            model_results: Dict mapping model name to ConfigurationResult or dict
         """
         records = []
 
         for model_name, result in model_results.items():
-            row = {
-                'Model': model_name,
-                'VIKOR_Q': result.get('vikor_q', np.nan)
-            }
+            # Handle both ConfigurationResult dataclass and dict
+            if hasattr(result, 'params'):
+                # ConfigurationResult dataclass
+                row = {'Model': model_name}
 
-            # Add objectives
-            objectives = result.get('objectives', {})
-            for obj_name, value in objectives.items():
-                row[obj_name] = value
+                # Add objectives (CV or test)
+                objectives = result.test_objectives if result.test_objectives is not None else result.cv_objectives
+                if objectives is not None:
+                    obj_names = ['ordinal_distance', 'severe_fnr', 'macro_f1_complement', 'complexity']
+                    for i, name in enumerate(obj_names):
+                        if i < len(objectives):
+                            row[name] = objectives[i]
 
-            # Add key parameters
-            params = result.get('params', {})
-            for param_name, value in params.items():
-                row[f'param_{param_name}'] = value
+                # Add key parameters
+                params = result.params if hasattr(result, 'params') else {}
+                for param_name, value in params.items():
+                    row[f'param_{param_name}'] = value
 
-            row['n_features'] = result.get('n_features', 'N/A')
+                # Add feature count
+                if result.feature_mask is not None:
+                    row['n_features'] = int(result.feature_mask.sum())
+                else:
+                    row['n_features'] = 'N/A'
+
+            else:
+                # Dict format
+                row = {
+                    'Model': model_name,
+                    'VIKOR_Q': result.get('vikor_q', np.nan)
+                }
+
+                # Add objectives
+                objectives = result.get('objectives', {})
+                for obj_name, value in objectives.items():
+                    row[obj_name] = value
+
+                # Add key parameters
+                params = result.get('params', {})
+                for param_name, value in params.items():
+                    row[f'param_{param_name}'] = value
+
+                row['n_features'] = result.get('n_features', 'N/A')
 
             records.append(row)
 

@@ -209,14 +209,14 @@ class FigureGenerator:
 
     def f5_pareto_fronts(
         self,
-        pareto_fronts: Dict[str, np.ndarray],
+        optimization_results: Dict[str, Any],
         objective_names: List[str] = ['Ordinal Distance', 'Severe FNR']
     ) -> Path:
         """
         F5: Pareto fronts per model.
 
         Args:
-            pareto_fronts: Dict mapping model name to objectives array
+            optimization_results: Dict mapping model name to OptimizationResult
             objective_names: Names of objectives for axes
         """
         if not MATPLOTLIB_AVAILABLE:
@@ -224,15 +224,25 @@ class FigureGenerator:
 
         fig, ax = plt.subplots(figsize=(10, 8))
 
-        colors = plt.cm.tab10(np.linspace(0, 1, len(pareto_fronts)))
+        colors = plt.cm.tab10(np.linspace(0, 1, len(optimization_results)))
         markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p']
 
-        for (model_name, objectives), color, marker in zip(
-            pareto_fronts.items(), colors, markers
+        for (model_name, opt_result), color, marker in zip(
+            optimization_results.items(), colors, markers
         ):
-            if len(objectives) > 0:
+            # Extract objectives from Pareto front
+            if hasattr(opt_result, 'pareto_front'):
+                front = opt_result.pareto_front
+                if front and len(front) > 0:
+                    objectives = np.array([obj for _, obj in front])
+                    ax.scatter(
+                        objectives[:, 0], objectives[:, 1],
+                        c=[color], marker=marker, s=100, alpha=0.7,
+                        label=model_name, edgecolors='black'
+                    )
+            elif isinstance(opt_result, np.ndarray) and len(opt_result) > 0:
                 ax.scatter(
-                    objectives[:, 0], objectives[:, 1],
+                    opt_result[:, 0], opt_result[:, 1],
                     c=[color], marker=marker, s=100, alpha=0.7,
                     label=model_name, edgecolors='black'
                 )
@@ -248,6 +258,111 @@ class FigureGenerator:
         plt.close()
 
         logger.info(f"Saved F5 to {output_path}")
+        return output_path
+
+    def f6_vikor_rankings(
+        self,
+        comparison_df: pd.DataFrame
+    ) -> Path:
+        """
+        F6: VIKOR rankings visualization.
+
+        Args:
+            comparison_df: DataFrame with model comparison from VIKOR
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+        # Plot 1: Q Score comparison
+        ax1 = axes[0]
+        models = comparison_df['Model'].values
+        q_scores = comparison_df['Q_Score'].values if 'Q_Score' in comparison_df.columns else np.zeros(len(models))
+
+        colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, len(models)))
+        bars = ax1.barh(range(len(models)), q_scores, color=colors)
+        ax1.set_yticks(range(len(models)))
+        ax1.set_yticklabels(models)
+        ax1.set_xlabel('VIKOR Q Score (lower is better)')
+        ax1.set_title('Model Rankings by VIKOR Q Score')
+
+        for bar, val in zip(bars, q_scores):
+            ax1.text(val + 0.01, bar.get_y() + bar.get_height()/2,
+                    f'{val:.3f}', ha='left', va='center', fontsize=10)
+
+        # Plot 2: Objectives radar chart (simplified as bar chart)
+        ax2 = axes[1]
+        obj_cols = [c for c in comparison_df.columns if c not in ['Model', 'Rank', 'Q_Score', 'n_features', 'In_Compromise_Set']]
+
+        if obj_cols:
+            x = np.arange(len(obj_cols))
+            width = 0.8 / len(models)
+
+            for i, (_, row) in enumerate(comparison_df.iterrows()):
+                values = [row[c] for c in obj_cols if c in row]
+                ax2.bar(x + i * width, values, width, label=row['Model'], alpha=0.8)
+
+            ax2.set_xticks(x + width * (len(models) - 1) / 2)
+            ax2.set_xticklabels([c.replace('_', '\n') for c in obj_cols], rotation=0)
+            ax2.set_ylabel('Objective Value')
+            ax2.set_title('Objective Values by Model')
+            ax2.legend(loc='upper right')
+
+        plt.tight_layout()
+
+        output_path = self.output_dir / "F6_vikor_rankings.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        plt.close()
+
+        logger.info(f"Saved F6 to {output_path}")
+        return output_path
+
+    def f7_shap_summary(
+        self,
+        importance: Dict[str, float],
+        feature_names: List[str],
+        top_k: int = 15
+    ) -> Path:
+        """
+        F7: SHAP feature importance summary.
+
+        Args:
+            importance: Dict mapping feature name to importance value
+            feature_names: List of feature names
+            top_k: Number of top features to show
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        # Sort by importance and take top k
+        sorted_importance = sorted(importance.items(), key=lambda x: abs(x[1]), reverse=True)[:top_k]
+
+        features = [f[0] for f in sorted_importance]
+        values = [f[1] for f in sorted_importance]
+
+        # Reverse for horizontal bar chart
+        features = features[::-1]
+        values = values[::-1]
+
+        colors = plt.cm.RdBu_r(np.linspace(0.2, 0.8, len(features)))
+        bars = ax.barh(range(len(features)), values, color=colors)
+
+        ax.set_yticks(range(len(features)))
+        ax.set_yticklabels(features)
+        ax.set_xlabel('Mean |SHAP Value|')
+        ax.set_title(f'Top {top_k} Feature Importance (SHAP)')
+        ax.axvline(0, color='black', linewidth=0.5)
+
+        plt.tight_layout()
+
+        output_path = self.output_dir / "F7_shap_summary.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        plt.close()
+
+        logger.info(f"Saved F7 to {output_path}")
         return output_path
 
     def f8_scenario_impact(

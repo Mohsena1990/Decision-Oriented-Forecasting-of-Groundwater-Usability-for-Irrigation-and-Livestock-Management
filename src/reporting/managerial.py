@@ -53,9 +53,14 @@ class ManagerialInsights:
 
             if 'test_metrics' in model_results:
                 metrics = model_results['test_metrics']
-                findings.append(f"- **Macro F1**: {metrics.get('macro_f1', 'N/A'):.3f}\n")
-                findings.append(f"- **Severe FNR**: {metrics.get('severe_fnr', 'N/A'):.3f}\n")
-                findings.append(f"- **Ordinal Distance**: {metrics.get('ordinal_distance', 'N/A'):.3f}\n")
+                findings.append(f"- **Macro F1**: {self._fmt_float(metrics.get('macro_f1'))}\n")
+                findings.append(f"- **Severe FNR**: {self._fmt_float(metrics.get('severe_fnr'))}\n")
+                findings.append(f"- **Ordinal Distance**: {self._fmt_float(metrics.get('ordinal_distance'))}\n")
+
+                metrics = model_results['test_metrics']
+                # findings.append(f"- **Macro F1**: {metrics.get('macro_f1', 'N/A'):.3f}\n")
+                # findings.append(f"- **Severe FNR**: {metrics.get('severe_fnr', 'N/A'):.3f}\n")
+                # findings.append(f"- **Ordinal Distance**: {metrics.get('ordinal_distance', 'N/A'):.3f}\n")
 
         # SHAP findings
         if shap_results:
@@ -175,3 +180,17 @@ class ManagerialInsights:
 
         logger.info(f"Saved insights to {self.output_dir}")
         return paths
+    
+    @staticmethod
+    def _fmt_float(value: Any, decimals: int = 3, na: str = "N/A") -> str:
+        """Format a value as a float with fixed decimals; return N/A if missing/not numeric."""
+        if value is None:
+            return na
+        # Handle common "N/A" strings
+        if isinstance(value, str) and value.strip().lower() in {"n/a", "na", "none", ""}:
+            return na
+        try:
+            return f"{float(value):.{decimals}f}"
+        except (TypeError, ValueError):
+            return na
+

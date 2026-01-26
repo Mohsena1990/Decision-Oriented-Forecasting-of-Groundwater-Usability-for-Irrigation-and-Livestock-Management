@@ -1,0 +1,10 @@
+Label,Index,C_Component,S_Component,High_Risk
+C2S1,0,2.0,1.0,No
+C3S1,1,3.0,1.0,No
+C3S2,2,3.0,2.0,No
+C3S3,3,3.0,3.0,Yes
+C4S1,4,4.0,1.0,Yes
+C4S2,5,4.0,2.0,Yes
+C4S3,6,4.0,3.0,Yes
+C4S4,7,4.0,4.0,Yes
+Other,8,,,No

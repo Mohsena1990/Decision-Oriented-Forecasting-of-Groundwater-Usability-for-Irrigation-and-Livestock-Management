@@ -6,11 +6,12 @@ A modular, decision-ready spatio-temporal forecasting framework for groundwater 
 
 This framework implements next-year (t → t+1) forecasting of groundwater quality classification (C#S# format) using machine learning models, with comprehensive support for:
 
-- **Multi-objective optimization** (PSO-GWO hybrid)
-- **Pareto-optimal model selection** (VIKOR MCDM)
-- **Explainability** (TreeSHAP and surrogate SHAP)
-- **Scenario simulation** for policy analysis
-- **Publication-ready outputs**
+- **4 Forecasting Models**: CatBoost, LightGBM, GRU, LSTM
+- **Multi-objective Optimization**: PSO-GWO hybrid metaheuristic
+- **Two-level Model Selection**: VIKOR MCDM for config and model selection
+- **Explainability**: TreeSHAP and Surrogate SHAP
+- **Scenario Simulation**: Policy analysis for TDS, SAR, RSC perturbations
+- **Publication-ready Outputs**: Figures and tables for journal submission
 
 ## Framework Architecture
 
@@ -18,11 +19,11 @@ This framework implements next-year (t → t+1) forecasting of groundwater quali
 ┌─────────────────────────────────────────────────────────────────┐
 │                    PIPELINE STAGES                               │
 ├─────────────────────────────────────────────────────────────────┤
-│ A. Data Ingestion    → B. Transition Building                    │
-│ C. Data Quality      → D. Preprocessing                          │
-│ E. Model Training    → F. PSO-GWO Optimization                   │
-│ G. VIKOR Selection   → H. SHAP Explainability                    │
-│ I. Scenarios         → J. Paper Outputs                          │
+│ A. Data Ingestion      → B. Transition Building                  │
+│ C. Data Quality        → D. Preprocessing                        │
+│ E. Setup               → F. PSO-GWO Optimization (4 Models)      │
+│ G. VIKOR Selection     → H. SHAP Explainability                  │
+│ I. Scenarios           → J. Paper Outputs                        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -35,28 +36,43 @@ This framework implements next-year (t → t+1) forecasting of groundwater quali
 - Leakage-safe preprocessing (fit on train only)
 
 ### Models (4 Forecasters)
+
 | Model | Type | Features |
 |-------|------|----------|
-| CatBoost | Tree | Native categorical handling |
-| LightGBM | Tree | Fast gradient boosting |
-| GRU | Deep | Categorical embeddings |
-| LSTM | Deep | Categorical embeddings |
+| CatBoost | Tree | Native categorical handling, early stopping |
+| LightGBM | Tree | Fast gradient boosting, early stopping |
+| GRU | Deep | Categorical embeddings, PyTorch-based |
+| LSTM | Deep | Categorical embeddings, PyTorch-based |
 
-### Optimization
-- **PSO-GWO Hybrid**: Combines exploration (PSO) with exploitation (GWO)
-- **Multi-objective**: Ordinal distance, Severe FNR, MacroF1, Complexity
-- **Pareto Archive**: Maintains non-dominated solutions
-- **Feature Selection**: Integrated wrapper-based selection
+### PSO-GWO Hybrid Optimization
 
-### Decision Making
-- **VIKOR MCDM**: Compromise solution ranking
-- **Two-level Selection**:
-  1. Best configuration per model
-  2. Best model across types
+For each model, the PSO-GWO optimizer tunes hyperparameters using multi-objective optimization:
+
+**Objectives (all minimized):**
+1. **Ordinal Distance Error**: Penalizes predictions far from true ordinal class
+2. **Severe FNR**: False negative rate for high-risk classes
+3. **1 - Macro F1**: Classification performance
+4. **Complexity**: Number of features + model size
+
+**Algorithm Features:**
+- Particle Swarm Optimization (exploration)
+- Grey Wolf Optimizer (exploitation)
+- Pareto archive for non-dominated solutions
+- Integrated feature selection
+
+### Two-Level VIKOR Model Selection
+
+**Level 1: Best Configuration per Model**
+- From each model's Pareto front, VIKOR selects the best compromise configuration
+- Balances all four objectives based on configurable weights
+
+**Level 2: Best Model Selection**
+- Evaluates best-configured models on test set
+- VIKOR ranks models and selects final winner
 
 ### Explainability
-- TreeSHAP for tree models
-- Surrogate SHAP for deep models (with fidelity checking)
+- **TreeSHAP**: For CatBoost and LightGBM models
+- **Surrogate SHAP**: For GRU/LSTM models (with fidelity checking)
 - Focus analysis on high-risk predictions
 
 ### Scenario Simulation
@@ -74,8 +90,8 @@ cd groundwater-forecasting
 
 # Create virtual environment (recommended)
 python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/Mac
+source venv/bin/activate  # Linux/Mac
+# venv\Scripts\activate  # Windows
 
 # Install dependencies
 pip install -r requirements.txt
@@ -86,6 +102,9 @@ pip install -r requirements.txt
 ```bash
 # Run the full pipeline
 python -m experiments.run_pipeline --config configs/main.yaml
+
+# Run with debug logging
+python -m experiments.run_pipeline --config configs/main.yaml --debug
 ```
 
 ## Repository Structure
@@ -110,19 +129,26 @@ groundwater-forecasting/
 │   ├── models/
 │   │   ├── base.py            # Abstract interface
 │   │   ├── trees/             # CatBoost, LightGBM
+│   │   │   ├── catboost_model.py
+│   │   │   └── lightgbm_model.py
 │   │   └── deep/              # GRU, LSTM
+│   │       ├── gru.py
+│   │       └── lstm.py
 │   ├── optimization/
 │   │   ├── pso_gwo.py         # Hybrid optimizer
 │   │   └── pareto.py          # Pareto archive
-│   ├── objectives/            # Multi-objective definitions
 │   ├── decision/
 │   │   ├── vikor.py           # VIKOR MCDM
-│   │   └── model_selection.py
+│   │   └── model_selection.py # Two-level selection
+│   ├── objectives/            # Multi-objective definitions
+│   │   ├── calculator.py
+│   │   └── definitions.py
 │   ├── explain/               # SHAP modules
 │   │   ├── shap_tree.py
 │   │   ├── surrogate.py
 │   │   └── fidelity.py
 │   ├── scenarios/             # Scenario simulation
+│   │   └── engine.py
 │   ├── reporting/             # Paper outputs
 │   │   ├── figures.py
 │   │   ├── tables.py
@@ -134,9 +160,6 @@ groundwater-forecasting/
 ├── experiments/
 │   └── run_pipeline.py        # Main entrypoint
 ├── tests/
-│   ├── test_data.py
-│   ├── test_models.py
-│   └── test_optimization.py
 ├── outputs/
 │   └── paper_outputs/
 │       ├── figures/
@@ -147,7 +170,7 @@ groundwater-forecasting/
 
 ## Configuration
 
-The main configuration file (`configs/main.yaml`) controls:
+The main configuration file (`configs/main.yaml`) controls all pipeline settings:
 
 ```yaml
 # Data paths
@@ -158,7 +181,7 @@ data:
     2019: "ground_water_quality_2019_post.csv"
     2020: "ground_water_quality_2020_post.csv"
 
-# Model settings
+# All 4 models
 models:
   catboost:
     enabled: true
@@ -166,14 +189,33 @@ models:
       iterations: [100, 500, 1000]
       depth: [4, 6, 8, 10]
       ...
+  lightgbm:
+    enabled: true
+    ...
+  gru:
+    enabled: true
+    params:
+      hidden_size: [32, 64, 128]
+      ...
+  lstm:
+    enabled: true
+    ...
 
-# Optimization
+# PSO-GWO Optimization
 optimization:
   algorithm: "pso_gwo"
   population_size: 30
   max_iterations: 50
+  pso:
+    w: 0.7
+    c1: 1.5
+    c2: 1.5
+  gwo:
+    a_start: 2.0
+    a_end: 0.0
+  hybrid_weight: 0.5
 
-# Objectives
+# Multi-objective weights
 objectives:
   ordinal_distance:
     enabled: true
@@ -181,7 +223,23 @@ objectives:
   severe_fnr:
     enabled: true
     weight: 1.5
-  ...
+  macro_f1:
+    enabled: true
+    weight: 1.0
+  complexity:
+    enabled: true
+    weight: 0.5
+
+# VIKOR MCDM
+mcdm:
+  method: "vikor"
+  vikor:
+    v: 0.5
+  objective_weights:
+    ordinal_distance: 0.25
+    severe_fnr: 0.35
+    macro_f1: 0.25
+    complexity: 0.15
 ```
 
 ## Classification System
@@ -195,27 +253,27 @@ The framework predicts groundwater quality classes in C#S# format:
 
 **High-Risk Classes**: C4S1, C4S2, C4S3, C4S4, C3S3, C3S4
 
-## Outputs
+## Pipeline Outputs
 
 ### Figures
-- F1: Framework flowchart (Mermaid)
-- F2: Class distribution per year
-- F3: Temporal forecasting schematic
-- F4: Model comparison
-- F5: Pareto fronts
-- F6: VIKOR rankings
-- F7: SHAP summary
-- F8: Scenario impact
-- F9: Spatial risk map
+- **F1**: Framework flowchart (Mermaid)
+- **F2**: Class distribution per year
+- **F3**: Temporal forecasting schematic
+- **F4**: Model comparison (all 4 models)
+- **F5**: Pareto fronts per model
+- **F6**: VIKOR rankings
+- **F7**: SHAP feature importance
+- **F8**: Scenario impact analysis
+- **F9**: Spatial risk map
 
 ### Tables
-- T1: Dataset overview + missingness
-- T2: Label mapping + high-risk definition
-- T3: Hyperparameter bounds
-- T4: Best configurations (VIKOR)
-- T5: Test performance + CIs
-- T6: SHAP drivers
-- T7: Scenario outcomes
+- **T1**: Dataset overview + missingness
+- **T2**: Label mapping + high-risk definition
+- **T3**: Hyperparameter search spaces
+- **T4**: Best configurations per model
+- **T5**: Test performance with metrics
+- **T6**: SHAP feature drivers
+- **T7**: Scenario outcomes
 
 ## Requirements
 
