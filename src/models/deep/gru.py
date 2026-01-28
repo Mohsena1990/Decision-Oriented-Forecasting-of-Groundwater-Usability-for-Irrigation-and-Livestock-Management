@@ -209,6 +209,7 @@ class GRUForecaster(BaseForecaster):
         patience = self.config.params.get('patience', 20)
         best_val_loss = float('inf')
         patience_counter = 0
+        log_interval = max(1, max_epochs // 10)  # Log ~10 times during training
 
         for epoch in range(max_epochs):
             self._network.train()
@@ -241,6 +242,12 @@ class GRUForecaster(BaseForecaster):
                         outputs = self._network(x_num, x_cat)
                         loss = criterion(outputs, targets)
                         val_loss += loss.item()
+
+                # Log progress periodically
+                if (epoch + 1) % log_interval == 0:
+                    avg_train_loss = train_loss / len(train_loader)
+                    avg_val_loss = val_loss / len(val_loader)
+                    logger.debug(f"Epoch {epoch + 1}/{max_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}")
 
                 # Early stopping
                 if val_loss < best_val_loss:

@@ -142,15 +142,22 @@ class PSOGWO:
         n_evaluations = 0
 
         # Evaluate initial population
-        for particle in self._particles:
+        logger.info(f"Evaluating initial population ({self.population_size} particles)...")
+        for i, particle in enumerate(self._particles):
             objectives = objective_fn(particle.position)
             n_evaluations += 1
             particle.personal_best_objectives = objectives.copy()
             self._pareto_archive.add(particle.position.copy(), objectives.copy())
+            if verbose and (i + 1) % 5 == 0:
+                logger.info(f"  Initial evaluation: {i + 1}/{self.population_size} particles done")
 
         # Main optimization loop
+        logger.info(f"Starting optimization ({self.max_iterations} iterations)...")
         for iteration in range(self.max_iterations):
             self._iteration = iteration
+
+            if verbose:
+                logger.info(f"Iteration {iteration + 1}/{self.max_iterations} - Evaluating {self.population_size} particles...")
 
             # Compute adaptive parameters
             a = self.a_start - (self.a_start - self.a_end) * (iteration / self.max_iterations)
@@ -159,7 +166,7 @@ class PSOGWO:
             # Get current leaders from Pareto archive
             alpha, beta, gamma = self._get_wolves()
 
-            for particle in self._particles:
+            for p_idx, particle in enumerate(self._particles):
                 # PSO velocity update
                 r1 = self._rng.random(self.n_dimensions)
                 r2 = self._rng.random(self.n_dimensions)
@@ -205,6 +212,10 @@ class PSOGWO:
                 objectives = objective_fn(particle.position)
                 n_evaluations += 1
 
+                # Log progress every 5 particles
+                if verbose and (p_idx + 1) % 5 == 0:
+                    logger.info(f"  Particle {p_idx + 1}/{self.population_size} evaluated, obj={objectives[0]:.4f}")
+
                 # Update personal best (using first objective for comparison)
                 if objectives[0] < particle.personal_best_objectives[0]:
                     particle.personal_best_position = particle.position.copy()
@@ -223,8 +234,8 @@ class PSOGWO:
                     'n_evaluations': n_evaluations
                 })
 
-                if verbose and iteration % 10 == 0:
-                    logger.info(f"Iteration {iteration}: Best obj = {best[1]}, Archive size = {len(self._pareto_archive)}")
+                if verbose:
+                    logger.info(f"Iteration {iteration + 1}/{self.max_iterations} complete: Best obj = {best[1][0]:.4f}, Archive size = {len(self._pareto_archive)}")
 
         # Return results
         best = self._pareto_archive.get_best_by_objective(0)
