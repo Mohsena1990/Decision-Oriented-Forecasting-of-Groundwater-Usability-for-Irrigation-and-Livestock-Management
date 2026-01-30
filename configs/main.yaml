@@ -7,7 +7,9 @@
 # DATA PATHS
 # -----------------------------------------------------------------------------
 data:
-  base_dir: "/Users/mohsenasghariilani/Downloads/archive"
+  base_dir: "/home/mohsen/data/archive"
+
+  # base_dir: "/Users/mohsenasghariilani/Downloads/archive"
   files:
     2018: "ground_water_quality_2018_post.csv"
     2019: "ground_water_quality_2019_post.csv"

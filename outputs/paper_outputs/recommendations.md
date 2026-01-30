@@ -4,15 +4,15 @@
 
 Based on the analysis, the following parameters should be prioritized for monitoring:
 
-- **gwl**: High influence on water quality classification
-
 - **pH**: High influence on water quality classification
 
-- **EC**: High influence on water quality classification
-
-- **TDS**: High influence on water quality classification
-
 - **CO3**: High influence on water quality classification
+
+- **HCO3**: High influence on water quality classification
+
+- **Cl**: High influence on water quality classification
+
+- **F**: High influence on water quality classification
 
 
 ## General Recommendations
