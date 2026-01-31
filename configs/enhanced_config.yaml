@@ -1,0 +1,440 @@
+# =============================================================================
+# ENHANCED CONFIGURATION FOR GROUNDWATER QUALITY FORECASTING
+# =============================================================================
+# Optimized based on data distribution analysis findings:
+# - Severe class imbalance (234:1 ratio)
+# - Covariate shift in gwl feature
+# - Multicollinearity (EC-TDS perfect correlation)
+# - Heavy-tailed distributions
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# DATA PATHS
+# -----------------------------------------------------------------------------
+data:
+  base_dir: "/Users/mohsenasghariilani/Downloads/archive"
+  files:
+    2018: "ground_water_quality_2018_post.csv"
+    2019: "ground_water_quality_2019_post.csv"
+    2020: "ground_water_quality_2020_post.csv"
+
+  location_keys:
+    - district
+    - mandal
+    - village
+    - lat_gis
+    - long_gis
+
+# -----------------------------------------------------------------------------
+# OUTPUT PATHS
+# -----------------------------------------------------------------------------
+output:
+  base_dir: "outputs"
+  paper_outputs: "outputs/paper_outputs"
+  figures: "outputs/paper_outputs/figures"
+  tables: "outputs/paper_outputs/tables"
+  models: "outputs/models"
+  logs: "outputs/logs"
+  checkpoints: "outputs/checkpoints"
+
+# -----------------------------------------------------------------------------
+# DATA QUALITY SETTINGS
+# -----------------------------------------------------------------------------
+data_quality:
+  expected_columns:
+    - sno
+    - district
+    - mandal
+    - village
+    - lat_gis
+    - long_gis
+    - pH
+    - EC
+    - CO3
+    - HCO3
+    - Cl
+    - F
+    - NO3
+    - SO4
+    - Na
+    - K
+    - Ca
+    - Mg
+    - TH
+    - SAR
+    - Classification
+    - RSC
+    - Classification_RSC
+
+  # NOTE: gwl and TDS intentionally excluded from expected columns
+  # gwl: Massive covariate shift (Cohen's d = -0.978)
+  # TDS: Perfectly correlated with EC (r=1.000) - redundant
+
+  high_missing_threshold: 0.30
+  drop_missing_threshold: 0.80
+
+  # Use IQR with higher multiplier for more robust outlier detection
+  outlier_method: "iqr"
+  iqr_multiplier: 2.0  # Increased from 1.5 to be more lenient
+
+  range_checks:
+    pH: [0, 14]
+    lat_gis: [8, 37]
+    long_gis: [68, 97]
+    EC: [0, 60000]
+    SAR: [0, 100]
+
+  cleaning:
+    drop_empty_columns: true
+    resolve_label_typos: true
+    handle_rare_classes: "merge"
+    rare_class_threshold: 5
+
+# -----------------------------------------------------------------------------
+# LABEL CONFIGURATION
+# -----------------------------------------------------------------------------
+labels:
+  target_column: "Classification"
+  secondary_column: "Classification_RSC"
+
+  typo_mapping:
+    "O.G": "OG"
+    "O.G.": "OG"
+    " C2S1": "C2S1"
+    "C2S1 ": "C2S1"
+
+  c_order: [1, 2, 3, 4]
+  s_order: [1, 2, 3, 4]
+
+  high_risk_classes:
+    - "C4S1"
+    - "C4S2"
+    - "C4S3"
+    - "C4S4"
+    - "C3S3"
+    - "C3S4"
+
+  ordinal_weights:
+    c_weight: 1.0
+    s_weight: 1.0
+
+# -----------------------------------------------------------------------------
+# ENHANCED PREPROCESSING CONFIGURATION
+# -----------------------------------------------------------------------------
+preprocessing:
+  # Use enhanced pipeline
+  use_enhanced_pipeline: true
+
+  # IMPORTANT: gwl and TDS removed based on analysis
+  # gwl: Non-discriminative (F=0.75) + massive covariate shift
+  # TDS: Redundant with EC (r=1.000)
+  numeric_features:
+    - pH
+    - EC
+    - CO3
+    - HCO3
+    - Cl
+    - F
+    - NO3
+    - SO4
+    - Na
+    - K
+    - Ca
+    - Mg
+    - TH
+    - SAR
+    - RSC
+
+  categorical_features:
+    - district
+    - mandal
+    - village
+
+  spatial_features:
+    - lat_gis
+    - long_gis
+
+  imputation:
+    numeric_strategy: "median"
+    categorical_strategy: "most_frequent"
+
+  # Use RobustScaler for outlier-robust scaling
+  scaling:
+    method: "robust"  # Changed from "standard" to handle outliers
+    fit_on_train_only: true
+    quantile_range: [5.0, 95.0]  # More robust range
+
+  # Stronger winsorization for high-outlier features
+  outlier_handling:
+    method: "winsorize"
+    lower_percentile: 0.02  # Stronger than 0.01
+    upper_percentile: 0.98
+    fit_on_train_only: true
+
+  # Power transform for highly skewed features
+  power_transform:
+    enabled: true
+    method: "yeo-johnson"
+    features:
+      - EC
+      - Cl
+      - NO3
+      - SO4
+      - Na
+      - K
+
+  # Feature engineering
+  feature_engineering:
+    add_current_class: true  # Use current year's class as feature
+    add_interactions: true   # Add key interactions
+
+    interaction_features:
+      - ["EC", "SAR"]      # Salinity-sodium interaction
+      - ["Na", "Ca"]       # Sodium-calcium balance
+      - ["Cl", "HCO3"]     # Chloride-bicarbonate ratio
+
+# -----------------------------------------------------------------------------
+# ENHANCED IMBALANCE HANDLING
+# -----------------------------------------------------------------------------
+imbalance:
+  strategy: "class_weights"
+
+  class_weights:
+    # Use custom high-risk weighting with 3x multiplier
+    method: "custom_high_risk"
+    high_risk_multiplier: 3.0
+
+    # Alternative: effective_number method
+    # method: "effective_number"
+    # beta: 0.999
+
+  # Optional SMOTE (use with caution - small dataset)
+  smote:
+    enabled: false  # Disabled - prefer class weights for this dataset
+    k_neighbors: 3  # Reduced from 5 due to small minority classes
+
+  # Threshold optimization for high-risk detection
+  threshold_optimization:
+    enabled: true
+    target_recall: 0.7  # Target 70% recall for high-risk classes
+    optimize_on_validation: true
+
+# -----------------------------------------------------------------------------
+# CROSS-VALIDATION & EVALUATION
+# -----------------------------------------------------------------------------
+evaluation:
+  temporal_split:
+    train_transitions: ["2018_2019"]
+    test_transitions: ["2019_2020"]
+
+  inner_cv:
+    method: "stratified_kfold"
+    n_splits: 5
+    shuffle: true
+    random_state: 42
+
+  group_by: null
+
+  bootstrap:
+    n_iterations: 1000
+    confidence_level: 0.95
+    random_state: 42
+
+# -----------------------------------------------------------------------------
+# MODEL CONFIGURATIONS (OPTIMIZED HYPERPARAMETERS)
+# -----------------------------------------------------------------------------
+models:
+  # CatBoost - Best for handling categorical features natively
+  catboost:
+    enabled: true
+    params:
+      # Reduced complexity to prevent overfitting on imbalanced data
+      iterations: [200, 500, 800]
+      depth: [4, 6, 8]  # Reduced max depth
+      learning_rate: [0.03, 0.05, 0.1]
+      l2_leaf_reg: [3, 5, 10]
+      border_count: [64, 128]
+      # Subsample for regularization
+      subsample: [0.8, 0.9]
+    fixed_params:
+      loss_function: "MultiClass"
+      eval_metric: "MultiClass"
+      random_seed: 42
+      verbose: false
+      use_best_model: true
+      early_stopping_rounds: 30  # Reduced from 50
+      auto_class_weights: "Balanced"  # Native class weighting
+
+  # LightGBM - Fast and handles imbalance with is_unbalance
+  lightgbm:
+    enabled: true
+    params:
+      n_estimators: [200, 500, 800]
+      max_depth: [4, 6, 8]  # Reduced max depth
+      learning_rate: [0.03, 0.05, 0.1]
+      num_leaves: [15, 31, 63]  # Reduced
+      min_child_samples: [20, 30, 50]  # Increased for stability
+      reg_alpha: [0.1, 0.5, 1.0]
+      reg_lambda: [0.1, 0.5, 1.0]
+      # Subsampling for regularization
+      subsample: [0.8, 0.9]
+      colsample_bytree: [0.8, 0.9]
+    fixed_params:
+      objective: "multiclass"
+      metric: "multi_logloss"
+      boosting_type: "gbdt"
+      random_state: 42
+      verbose: -1
+      force_col_wise: true
+      is_unbalance: true  # Enable built-in imbalance handling
+
+  # GRU - Recurrent model with focal loss
+  gru:
+    enabled: true
+    params:
+      hidden_size: [64, 128, 256]  # Increased capacity
+      num_layers: [1, 2]
+      dropout: [0.3, 0.4, 0.5]  # Higher dropout for regularization
+      learning_rate: [0.0005, 0.001, 0.002]
+      batch_size: [32, 64]
+      embedding_dim: [16, 32]
+    fixed_params:
+      max_epochs: 300  # Increased
+      patience: 30  # Increased
+      random_seed: 42
+      # Use focal loss for imbalance
+      loss_type: "focal"
+      focal_gamma: 2.0
+
+  # LSTM - Similar to GRU with LSTM cells
+  lstm:
+    enabled: true
+    params:
+      hidden_size: [64, 128, 256]
+      num_layers: [1, 2]
+      dropout: [0.3, 0.4, 0.5]
+      learning_rate: [0.0005, 0.001, 0.002]
+      batch_size: [32, 64]
+      embedding_dim: [16, 32]
+    fixed_params:
+      max_epochs: 300
+      patience: 30
+      random_seed: 42
+      loss_type: "focal"
+      focal_gamma: 2.0
+
+# -----------------------------------------------------------------------------
+# OPTIMIZATION (PSO-GWO)
+# -----------------------------------------------------------------------------
+optimization:
+  algorithm: "pso_gwo"
+
+  # Reduced iterations for faster convergence on small dataset
+  population_size: 20
+  max_iterations: 30
+
+  pso:
+    w: 0.6  # Reduced inertia for faster convergence
+    c1: 1.8  # Increased cognitive
+    c2: 1.2  # Reduced social
+
+  gwo:
+    alpha_decay: true
+    a_start: 2.0
+    a_end: 0.0
+
+  hybrid_weight: 0.5
+  random_state: 42
+
+# -----------------------------------------------------------------------------
+# OBJECTIVES (WEIGHTED FOR HIGH-RISK DETECTION)
+# -----------------------------------------------------------------------------
+objectives:
+  ordinal_distance:
+    enabled: true
+    weight: 0.8  # Reduced
+
+  severe_fnr:
+    enabled: true
+    weight: 2.5  # INCREASED - prioritize high-risk detection
+
+  macro_f1:
+    enabled: true
+    weight: 1.0
+
+  complexity:
+    enabled: true
+    weight: 0.3  # Reduced - prefer simpler models
+
+# -----------------------------------------------------------------------------
+# MCDM (VIKOR) - ADJUSTED FOR HIGH-RISK PRIORITY
+# -----------------------------------------------------------------------------
+mcdm:
+  method: "vikor"
+
+  vikor:
+    v: 0.6  # Increased toward group utility
+
+  # Weights prioritize severe_fnr (high-risk detection)
+  objective_weights:
+    ordinal_distance: 0.20
+    severe_fnr: 0.45  # HIGHEST - critical for high-risk detection
+    macro_f1: 0.25
+    complexity: 0.10
+
+# -----------------------------------------------------------------------------
+# EXPLAINABILITY (SHAP)
+# -----------------------------------------------------------------------------
+explainability:
+  tree_shap:
+    enabled: true
+    max_samples: 500
+
+  surrogate:
+    enabled: true
+    surrogate_model: "lightgbm"
+    min_fidelity_r2: 0.85
+    min_fidelity_corr: 0.90
+
+  top_k_features: 10
+  focus_on_high_risk: true
+
+# -----------------------------------------------------------------------------
+# SCENARIO SIMULATION
+# -----------------------------------------------------------------------------
+scenarios:
+  tds:
+    perturbations: [0.1, 0.2, 0.3]
+    direction: "increase"
+
+  sar:
+    perturbations: [0.1, 0.2]
+    direction: "increase"
+
+  rsc:
+    thresholds: [1.25, 2.5]
+    shift_type: "threshold_crossing"
+
+  combined:
+    enabled: true
+    scenarios:
+      - name: "high_salinity"
+        tds: 0.2
+        sar: 0.1
+
+# -----------------------------------------------------------------------------
+# REPRODUCIBILITY
+# -----------------------------------------------------------------------------
+reproducibility:
+  global_seed: 42
+  deterministic: true
+  log_all_configs: true
+
+# -----------------------------------------------------------------------------
+# LOGGING
+# -----------------------------------------------------------------------------
+logging:
+  level: "INFO"
+  file_logging: true
+  console_logging: true
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
