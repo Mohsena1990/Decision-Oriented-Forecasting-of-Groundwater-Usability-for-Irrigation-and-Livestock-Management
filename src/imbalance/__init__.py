@@ -7,6 +7,9 @@ from .enhanced_handlers import (
     compute_sample_weights,
     optimize_threshold_for_recall,
     apply_threshold_adjustment,
+    calibrate_probabilities,
+    compute_imbalance_aware_metrics,
+    CostMatrix,
 )
 
 # Import PyTorch losses if available
@@ -27,6 +30,9 @@ __all__ = [
     "compute_sample_weights",
     "optimize_threshold_for_recall",
     "apply_threshold_adjustment",
+    "calibrate_probabilities",
+    "compute_imbalance_aware_metrics",
+    "CostMatrix",
     "FocalLoss",
     "ClassBalancedLoss",
     "create_loss_function",
