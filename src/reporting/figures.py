@@ -26,6 +26,13 @@ try:
 except ImportError:
     SEABORN_AVAILABLE = False
 
+try:
+    import shap as _shap_lib
+    SHAP_AVAILABLE = True
+except ImportError:
+    SHAP_AVAILABLE = False
+    _shap_lib = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -444,6 +451,400 @@ class FigureGenerator:
 
         logger.info(f"Saved F9 to {output_path}")
         return output_path
+
+    # ------------------------------------------------------------------
+    # Enhanced SHAP figures
+    # ------------------------------------------------------------------
+
+    def f7b_shap_beeswarm(
+        self,
+        shap_values: np.ndarray,
+        X: np.ndarray,
+        feature_names: List[str],
+        top_k: int = 15,
+    ) -> Optional[Path]:
+        """
+        F7b: Beeswarm (dot-strip) plot of SHAP values.
+
+        Each dot represents one sample; x-position is its SHAP value for
+        that feature; colour encodes the original feature value (red=high,
+        blue=low), matching the standard SHAP beeswarm convention.
+
+        Parameters
+        ----------
+        shap_values : np.ndarray
+            Shape (n_samples, n_features) or (n_samples, n_features, n_classes).
+            For multi-class arrays the mean absolute SHAP across classes is used.
+        X : np.ndarray
+            Original (unscaled if possible) feature matrix — used for colouring.
+        feature_names : list of str
+        top_k : int
+            Number of top features to display.
+
+        Returns
+        -------
+        Path to saved figure, or None if matplotlib unavailable.
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        # Collapse multi-class SHAP to 2-D
+        if shap_values.ndim == 3:
+            sv2d = np.mean(np.abs(shap_values), axis=2)   # (n, n_feat)
+            sv_signed = np.mean(shap_values, axis=2)       # for sign
+        else:
+            sv2d = shap_values
+            sv_signed = shap_values
+
+        # Select top-k by mean |SHAP|
+        importance = np.mean(np.abs(sv2d), axis=0)
+        top_idx = np.argsort(importance)[-top_k:]          # ascending → last = most important
+        top_idx_rev = top_idx[::-1]                        # most important first (top of plot)
+
+        fig, ax = plt.subplots(figsize=(10, max(6, top_k * 0.5)))
+
+        rng = np.random.default_rng(42)
+        cmap = plt.cm.RdBu_r
+
+        for plot_row, feat_idx in enumerate(top_idx):      # plot_row 0 = least important (bottom)
+            sv_col = sv_signed[:, feat_idx]
+            feat_col = X[:, feat_idx] if feat_idx < X.shape[1] else np.zeros(len(sv_col))
+
+            # Normalise feature values to [0, 1] for colour
+            f_min, f_max = feat_col.min(), feat_col.max()
+            if f_max > f_min:
+                colour_vals = (feat_col - f_min) / (f_max - f_min)
+            else:
+                colour_vals = np.full_like(feat_col, 0.5)
+
+            # Jitter on y so points do not overlap
+            y_jitter = plot_row + rng.uniform(-0.35, 0.35, len(sv_col))
+            ax.scatter(sv_col, y_jitter, c=colour_vals, cmap=cmap,
+                       alpha=0.55, s=12, vmin=0, vmax=1)
+
+        feat_labels = [feature_names[i] for i in top_idx]
+        ax.set_yticks(range(len(top_idx)))
+        ax.set_yticklabels(feat_labels, fontsize=9)
+        ax.axvline(0, color="black", linewidth=0.8, linestyle="--")
+        ax.set_xlabel("SHAP value  (impact on model output)")
+        ax.set_title(f"SHAP Beeswarm — Top {len(top_idx)} Features")
+
+        # Colour bar indicating feature value magnitude
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, 1))
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax, pad=0.01)
+        cbar.set_label("Feature value (low → high)", fontsize=8)
+        cbar.set_ticks([0, 1])
+        cbar.set_ticklabels(["Low", "High"])
+
+        plt.tight_layout()
+        output_path = self.output_dir / "F7b_shap_beeswarm.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        plt.close()
+        logger.info(f"Saved F7b to {output_path}")
+        return output_path
+
+    def f7c_shap_class_comparison(
+        self,
+        global_importance: pd.DataFrame,
+        high_risk_importance: pd.DataFrame,
+        top_k: int = 12,
+    ) -> Optional[Path]:
+        """
+        F7c: Side-by-side bar chart comparing global vs high-risk SHAP.
+
+        Shows which features drive predictions *in general* versus
+        which features specifically drive high-risk classifications,
+        enabling identification of hazard-specific chemical drivers.
+
+        Parameters
+        ----------
+        global_importance : pd.DataFrame
+            Columns: ['feature', 'importance'].  Global mean |SHAP|.
+        high_risk_importance : pd.DataFrame
+            Same structure but computed on high-risk predictions only.
+        top_k : int
+            Number of top global features to include.
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        # Align both DataFrames on top-k global features
+        top_features = global_importance.head(top_k)["feature"].tolist()
+
+        global_vals = (
+            global_importance.set_index("feature")["importance"]
+            .reindex(top_features).fillna(0).values
+        )
+        hr_vals = (
+            high_risk_importance.set_index("feature")["importance"]
+            .reindex(top_features).fillna(0).values
+        )
+
+        x = np.arange(len(top_features))
+        width = 0.38
+
+        fig, ax = plt.subplots(figsize=(12, 5))
+        bars_g = ax.bar(x - width / 2, global_vals, width,
+                        label="Global (all classes)", color="#4C72B0", alpha=0.85)
+        bars_h = ax.bar(x + width / 2, hr_vals, width,
+                        label="High-risk class", color="#DD8452", alpha=0.85)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(top_features, rotation=40, ha="right", fontsize=9)
+        ax.set_ylabel("Mean |SHAP value|")
+        ax.set_title("SHAP Feature Importance: Global vs High-Risk Class")
+        ax.legend()
+        ax.grid(axis="y", alpha=0.3)
+
+        plt.tight_layout()
+        output_path = self.output_dir / "F7c_shap_class_comparison.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        plt.close()
+        logger.info(f"Saved F7c to {output_path}")
+        return output_path
+
+    def f7d_shap_dependence(
+        self,
+        shap_values: np.ndarray,
+        X: np.ndarray,
+        feature_names: List[str],
+        top_features: Optional[List[str]] = None,
+        n_plots: int = 4,
+    ) -> Optional[Path]:
+        """
+        F7d: SHAP dependence plots for the most important features.
+
+        Each sub-plot shows SHAP value (y) vs raw feature value (x) for
+        one feature, with colour representing the most correlated other
+        feature (interaction indicator).
+
+        Parameters
+        ----------
+        shap_values : np.ndarray
+            (n_samples, n_features) or (n_samples, n_features, n_classes).
+        X : np.ndarray
+            Feature matrix (same ordering as feature_names).
+        feature_names : list of str
+        top_features : list of str, optional
+            Ordered list of features to plot.  If None, inferred from
+            mean |SHAP|.
+        n_plots : int
+            Number of dependence sub-plots (max 4).
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        n_plots = min(n_plots, 4)
+
+        # Collapse multi-class
+        if shap_values.ndim == 3:
+            sv = np.mean(shap_values, axis=2)
+        else:
+            sv = shap_values
+
+        # Determine which features to plot
+        if top_features is None:
+            importance = np.mean(np.abs(sv), axis=0)
+            top_idx = np.argsort(importance)[-n_plots:][::-1]
+        else:
+            top_idx = []
+            for f in top_features[:n_plots]:
+                if f in feature_names:
+                    top_idx.append(feature_names.index(f))
+            if not top_idx:
+                importance = np.mean(np.abs(sv), axis=0)
+                top_idx = list(np.argsort(importance)[-n_plots:][::-1])
+
+        ncols = min(2, n_plots)
+        nrows = (n_plots + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(6 * ncols, 4.5 * nrows),
+                                 squeeze=False)
+
+        for plot_i, feat_idx in enumerate(top_idx[:n_plots]):
+            row, col = divmod(plot_i, ncols)
+            ax = axes[row][col]
+
+            feat_name = feature_names[feat_idx]
+            shap_col = sv[:, feat_idx]
+            x_vals = X[:, feat_idx]
+
+            # Find most correlated feature for colour (simple approach)
+            corrs = [
+                abs(np.corrcoef(X[:, j], shap_col)[0, 1])
+                if j != feat_idx else 0.0
+                for j in range(X.shape[1])
+            ]
+            color_feat_idx = int(np.argmax(corrs))
+            color_vals = X[:, color_feat_idx]
+            color_name = feature_names[color_feat_idx] if color_feat_idx < len(feature_names) else "other"
+
+            # Normalise colour
+            c_min, c_max = color_vals.min(), color_vals.max()
+            if c_max > c_min:
+                c_norm = (color_vals - c_min) / (c_max - c_min)
+            else:
+                c_norm = np.full_like(color_vals, 0.5)
+
+            sc = ax.scatter(x_vals, shap_col, c=c_norm, cmap="RdBu_r",
+                            alpha=0.6, s=15, vmin=0, vmax=1)
+            ax.axhline(0, color="black", linewidth=0.7, linestyle="--")
+            ax.set_xlabel(feat_name, fontsize=10)
+            ax.set_ylabel(f"SHAP({feat_name})", fontsize=9)
+            ax.set_title(f"Dependence: {feat_name}", fontsize=10)
+            plt.colorbar(sc, ax=ax).set_label(color_name, fontsize=8)
+
+        # Hide unused axes
+        for plot_i in range(len(top_idx), nrows * ncols):
+            row, col = divmod(plot_i, ncols)
+            axes[row][col].set_visible(False)
+
+        plt.suptitle("SHAP Dependence Plots — Top Features", fontsize=13, y=1.01)
+        plt.tight_layout()
+        output_path = self.output_dir / "F7d_shap_dependence.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        plt.close()
+        logger.info(f"Saved F7d to {output_path}")
+        return output_path
+
+    def f7e_shap_class_heatmap(
+        self,
+        shap_values: np.ndarray,
+        feature_names: List[str],
+        class_names: Optional[List[str]] = None,
+        top_k: int = 12,
+    ) -> Optional[Path]:
+        """
+        F7e: Heatmap of mean |SHAP| per feature × class.
+
+        Reveals which features are most diagnostic for each water quality
+        class, including the critical high-risk classes.
+
+        Parameters
+        ----------
+        shap_values : np.ndarray
+            Shape (n_samples, n_features, n_classes).
+        feature_names : list of str
+        class_names : list of str, optional
+        top_k : int
+            Number of top features (by global importance) to display.
+        """
+        if not MATPLOTLIB_AVAILABLE or shap_values.ndim != 3:
+            return None
+
+        n_classes = shap_values.shape[2]
+        if class_names is None:
+            class_names = [f"Class {i}" for i in range(n_classes)]
+
+        # Global importance → select top-k features
+        global_imp = np.mean(np.abs(shap_values), axis=(0, 2))  # (n_features,)
+        top_idx = np.argsort(global_imp)[-top_k:][::-1]
+
+        # Build matrix: (top_k, n_classes)
+        heatmap_data = np.zeros((len(top_idx), n_classes), dtype=np.float32)
+        for row_i, f_idx in enumerate(top_idx):
+            for c_idx in range(n_classes):
+                heatmap_data[row_i, c_idx] = float(
+                    np.mean(np.abs(shap_values[:, f_idx, c_idx]))
+                )
+
+        feat_labels = [feature_names[i] for i in top_idx]
+
+        fig, ax = plt.subplots(figsize=(max(8, n_classes * 1.2), max(6, top_k * 0.5)))
+
+        if SEABORN_AVAILABLE:
+            import seaborn as sns
+            df_heat = pd.DataFrame(heatmap_data, index=feat_labels, columns=class_names)
+            sns.heatmap(
+                df_heat, ax=ax, cmap="YlOrRd", annot=True, fmt=".2f",
+                linewidths=0.4, cbar_kws={"label": "Mean |SHAP|"},
+            )
+        else:
+            im = ax.imshow(heatmap_data, aspect="auto", cmap="YlOrRd")
+            ax.set_xticks(range(n_classes))
+            ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=8)
+            ax.set_yticks(range(len(feat_labels)))
+            ax.set_yticklabels(feat_labels, fontsize=9)
+            plt.colorbar(im, ax=ax, label="Mean |SHAP|")
+
+        ax.set_title("SHAP Feature Importance per Class", fontsize=13)
+        plt.tight_layout()
+        output_path = self.output_dir / "F7e_shap_class_heatmap.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        plt.close()
+        logger.info(f"Saved F7e to {output_path}")
+        return output_path
+
+    def generate_all_shap_figures(
+        self,
+        shap_result: Any,
+        X: np.ndarray,
+        global_importance: Optional[pd.DataFrame] = None,
+        high_risk_importance: Optional[pd.DataFrame] = None,
+        class_names: Optional[List[str]] = None,
+        top_k: int = 15,
+    ) -> Dict[str, Optional[Path]]:
+        """
+        Convenience wrapper: generate all SHAP analysis figures (F7 – F7e).
+
+        Parameters
+        ----------
+        shap_result : SHAPResult
+            Object with .shap_values, .feature_names, .global_importance.
+        X : np.ndarray
+            Feature matrix (used for beeswarm & dependence colouring).
+        global_importance : pd.DataFrame, optional
+            Falls back to shap_result.global_importance.
+        high_risk_importance : pd.DataFrame, optional
+            If None, F7c is skipped.
+        class_names : list of str, optional
+        top_k : int
+
+        Returns
+        -------
+        dict mapping figure code → Path (or None).
+        """
+        sv = shap_result.shap_values
+        feat_names = shap_result.feature_names
+        if global_importance is None:
+            global_importance = shap_result.global_importance
+
+        paths: Dict[str, Optional[Path]] = {}
+
+        # F7 — bar chart (existing)
+        imp_dict = dict(zip(
+            global_importance["feature"], global_importance["importance"]
+        ))
+        paths["F7"] = self.f7_shap_summary(imp_dict, feat_names, top_k=top_k)
+
+        # F7b — beeswarm
+        paths["F7b"] = self.f7b_shap_beeswarm(sv, X, feat_names, top_k=top_k)
+
+        # F7c — global vs high-risk comparison
+        if high_risk_importance is not None:
+            paths["F7c"] = self.f7c_shap_class_comparison(
+                global_importance, high_risk_importance, top_k=min(top_k, 12)
+            )
+        else:
+            paths["F7c"] = None
+
+        # F7d — dependence plots for top features
+        top_feats = global_importance.head(4)["feature"].tolist()
+        paths["F7d"] = self.f7d_shap_dependence(sv, X, feat_names,
+                                                  top_features=top_feats)
+
+        # F7e — per-class heatmap (only for 3-D SHAP arrays)
+        if sv.ndim == 3:
+            paths["F7e"] = self.f7e_shap_class_heatmap(
+                sv, feat_names, class_names=class_names, top_k=min(top_k, 12)
+            )
+        else:
+            paths["F7e"] = None
+
+        saved = [k for k, v in paths.items() if v is not None]
+        logger.info(f"Generated SHAP figures: {saved}")
+        return paths
 
     def create_mermaid_flowchart(self) -> Path:
         """

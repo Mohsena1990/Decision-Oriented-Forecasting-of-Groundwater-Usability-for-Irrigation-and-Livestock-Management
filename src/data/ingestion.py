@@ -4,6 +4,12 @@ Data Ingestion Module
 
 Handles loading groundwater quality data from CSV files with proper
 year identification and initial column standardization.
+
+Raw preprocessing applied per the original data cleaning script:
+  - Year-specific column renaming (chemical notation standardisation)
+  - Dropping redundant columns (sno, season)
+  - Year column assignment
+  - Specific outlier / typo fixes identified in the raw CSVs
 """
 
 import logging
@@ -14,6 +20,48 @@ from typing import Dict, List, Optional, Union
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Year-specific raw column renames
+# (raw CSV name → intermediate name consumed by DataHarmonizer)
+# ---------------------------------------------------------------------------
+_RAW_COLUMN_RENAMES: Dict[int, Dict[str, str]] = {
+    2019: {
+        'EC': 'E.C',       # 2019 CSV uses plain "EC"; rename so harmoniser
+                           # can map "e.c" → canonical "EC" consistently
+        'CO_-2 ':  'CO3',
+        'HCO_ - ': 'HCO3',
+        'Cl -':    'Cl',
+        'F -':     'F',
+        'NO3- ':   'NO3',
+        'SO4-2':   'SO4',
+        'Na+':     'Na',
+        'K+':      'K',
+        'Ca+2':    'Ca',
+        'Mg+2':    'Mg',
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Columns to drop after loading (present in raw CSVs, not needed downstream)
+# ---------------------------------------------------------------------------
+_COLS_TO_DROP: Dict[int, List[str]] = {
+    2018: ['sno', 'season'],
+    2019: ['sno', 'season'],
+    2020: ['sno', 'season'],   # 'Unnamed: 8' is already removed by the
+                                # generic unnamed-column handler
+}
+
+# ---------------------------------------------------------------------------
+# Specific cell-level outlier / typo corrections for year 2020
+# These were found by manual inspection of the raw CSV.
+# ---------------------------------------------------------------------------
+_YEAR_2020_FIXES = [
+    # (column, row_index, old_value_fragment, correct_value)
+    ('pH',            261, '8..05',  '8.05'),
+    ('Classification', 178, 'O.G',  'OG'),
+    ('Classification', 208, 'O.G',  'OG'),
+]
 
 
 @dataclass
@@ -81,17 +129,64 @@ class DataIngestion:
         # Initial column name cleaning (spaces, special chars)
         df.columns = df.columns.str.strip()
 
+        # Apply year-specific column renames BEFORE harmonisation
+        if year in _RAW_COLUMN_RENAMES:
+            df = df.rename(columns=_RAW_COLUMN_RENAMES[year])
+            logger.debug(f"Year {year}: applied raw column renames")
+
         # Remove completely empty columns
         empty_cols = df.columns[df.isna().all()]
         if len(empty_cols) > 0:
             logger.debug(f"Year {year}: Removing {len(empty_cols)} empty columns: {list(empty_cols)}")
             df = df.drop(columns=empty_cols)
 
-        # Remove unnamed columns (artifacts from CSV parsing)
+        # Remove unnamed columns (artifacts from CSV parsing, e.g. 'Unnamed: 8')
         unnamed_cols = [c for c in df.columns if c.startswith('Unnamed')]
         if unnamed_cols:
             logger.debug(f"Year {year}: Removing {len(unnamed_cols)} unnamed columns")
             df = df.drop(columns=unnamed_cols)
+
+        # Drop redundant administrative columns (sno, season)
+        if year in _COLS_TO_DROP:
+            drop_present = [c for c in _COLS_TO_DROP[year] if c in df.columns]
+            if drop_present:
+                df = df.drop(columns=drop_present)
+                logger.debug(f"Year {year}: Dropped columns {drop_present}")
+
+        # Apply cell-level outlier / typo fixes for year 2020
+        if year == 2020:
+            df = self._fix_year2020_outliers(df)
+
+        return df
+
+    def _fix_year2020_outliers(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Apply known cell-level corrections for the 2020 raw CSV.
+
+        Fixes identified by manual inspection:
+          - pH at row 261:  '8..05' → '8.05'   (double-dot typo)
+          - Classification at rows 178, 208: 'O.G' → 'OG'
+        """
+        for col, idx, bad_val, good_val in _YEAR_2020_FIXES:
+            if col not in df.columns:
+                continue
+            if idx >= len(df):
+                logger.debug(f"Year 2020 fix: row {idx} out of range for column '{col}'")
+                continue
+
+            cell = df[col].iloc[idx]
+            if pd.isna(cell):
+                continue
+
+            cell_str = str(cell)
+            if bad_val in cell_str:
+                fixed = cell_str.replace(bad_val, good_val)
+                df.iloc[idx, df.columns.get_loc(col)] = fixed
+                logger.debug(f"Year 2020: fixed '{col}'[{idx}]: '{cell_str}' → '{fixed}'")
+
+        # Ensure pH is numeric after potential string fixes
+        if 'pH' in df.columns:
+            df['pH'] = pd.to_numeric(df['pH'], errors='coerce')
 
         return df
 
