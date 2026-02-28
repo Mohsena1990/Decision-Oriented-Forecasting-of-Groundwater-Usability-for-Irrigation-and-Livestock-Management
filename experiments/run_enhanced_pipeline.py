@@ -637,6 +637,7 @@ def run_enhanced_pipeline(config_path: str):
 
     final_models = {}
     all_results = []
+    final_preds = {}  # model_name -> (y_test, y_pred_adj, y_proba)
 
     metrics_calc = MetricsCalculator(
         label_to_ordinal=ordinal_mapping,
@@ -717,6 +718,7 @@ def run_enhanced_pipeline(config_path: str):
         logger.info(f"  Test Objectives: {test_objectives}")
 
         all_results.append(metrics)
+        final_preds[model_name] = (y_test, y_pred_adjusted, y_proba)
 
     # Final model selection
     final_selection = model_selector.select_best_model(best_configs)
@@ -747,6 +749,54 @@ def run_enhanced_pipeline(config_path: str):
     # Save results
     results_df.to_csv(paper_output_dir / 'tables' / 'model_results.csv', index=False)
     logger.info(f"\nResults saved to {paper_output_dir / 'tables' / 'model_results.csv'}")
+
+    # =========================================================================
+    # STAGE J: Paper Figures
+    # =========================================================================
+    logger.info("\n[STAGE J] Generating Paper Figures")
+
+    fig_gen = FigureGenerator(output_dir=paper_output_dir / 'figures', dpi=300)
+    fig_gen.f2_class_distribution(data, target_col='Classification')
+    fig_gen.f3_temporal_forecasting_schematic()
+    fig_gen.create_mermaid_flowchart()
+
+    # F4: model comparison bar chart
+    metric_cols = ['macro_f1', 'severe_fnr', 'ordinal_distance_mean']
+    avail_metrics = [c for c in metric_cols if c in results_df.columns]
+    if avail_metrics:
+        fig_gen.f4_model_comparison(results_df, metrics=avail_metrics)
+
+    # F4d: severity metrics across models
+    fig_gen.f4d_severity_comparison(results_df)
+
+    # F5: Pareto fronts
+    fig_gen.f5_pareto_fronts(optimization_results)
+
+    # F6: VIKOR rankings
+    objective_names = ['Ordinal Distance', 'Severe FNR', '1 - Macro F1', 'Complexity']
+    try:
+        comparison_df = model_selector.generate_comparison_table(
+            final_selection, objective_names=objective_names
+        )
+        fig_gen.f6_vikor_rankings(comparison_df)
+        comparison_df.to_csv(paper_output_dir / 'tables' / 'model_comparison_vikor.csv', index=False)
+    except Exception as _e:
+        logger.warning(f"F6 VIKOR figure skipped: {_e}")
+
+    # F4b: confusion matrix + F4c: per-class metrics for best model
+    best_model_name = final_selection.best_model_name
+    class_names_list = [idx_to_label.get(i, str(i)) for i in range(n_classes)]
+    if best_model_name in final_preds:
+        y_true_bm, y_pred_bm, _ = final_preds[best_model_name]
+        fig_gen.f4b_confusion_matrix(
+            y_true_bm, y_pred_bm,
+            class_names=class_names_list,
+            model_name=best_model_name,
+        )
+        per_class = metrics_calc.get_per_class_metrics(y_true_bm, y_pred_bm)
+        fig_gen.f4c_per_class_metrics(per_class, model_name=best_model_name)
+
+    logger.info(f"  Figures saved to {paper_output_dir / 'figures'}")
 
     # Print final summary
     logger.info("\n" + "=" * 70)

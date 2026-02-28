@@ -648,6 +648,7 @@ def run_v2_pipeline(config_path: str):
 
     final_models: Dict[str, Tuple] = {}
     all_results: List[Dict] = []
+    final_preds: Dict[str, Tuple] = {}  # model_name -> (y_true, y_pred_adj, y_proba)
 
     for model_name, cfg_result in best_configs.items():
         params = cfg_result.params
@@ -710,6 +711,7 @@ def run_v2_pipeline(config_path: str):
             f"Severe-FNR={metrics['severe_fnr']:.4f}"
         )
         all_results.append(metrics)
+        final_preds[model_name] = (y_test, y_pred_adj, y_proba)
 
     final_selection = model_selector.select_best_model(best_configs)
     logger.info(f"\n  Best model: {final_selection.best_model_name}")
@@ -761,17 +763,44 @@ def run_v2_pipeline(config_path: str):
     fig_gen.create_mermaid_flowchart()
 
     if all_results:
-        results_df = pd.DataFrame(all_results)
-        metric_cols = ["macro_f1", "severe_fnr", "ordinal_distance"]
-        avail_metrics = [c for c in metric_cols if c in results_df.columns]
+        results_df_stage_k = pd.DataFrame(all_results)
+        metric_cols = ["macro_f1", "severe_fnr", "ordinal_distance_mean"]
+        avail_metrics = [c for c in metric_cols if c in results_df_stage_k.columns]
         if avail_metrics:
-            fig_gen.f4_model_comparison(results_df, metrics=avail_metrics)
+            fig_gen.f4_model_comparison(results_df_stage_k, metrics=avail_metrics)
+
+        # F4d: severity metrics comparison across all models
+        fig_gen.f4d_severity_comparison(results_df_stage_k)
 
     fig_gen.f5_pareto_fronts(optimization_results)
 
+    # F6: VIKOR rankings
+    objective_names = ["Ordinal Distance", "Severe FNR", "1 - Macro F1", "Complexity"]
+    try:
+        comparison_df = model_selector.generate_comparison_table(
+            final_selection, objective_names=objective_names
+        )
+        fig_gen.f6_vikor_rankings(comparison_df)
+        comparison_df.to_csv(
+            paper_output_dir / "tables" / "model_comparison_vikor.csv", index=False
+        )
+    except Exception as _e:
+        logger.warning(f"  F6 VIKOR figure skipped: {_e}")
+
+    # F4b: Confusion matrix + F4c: per-class metrics for best model
+    class_names_list = [idx_to_label.get(i, str(i)) for i in range(n_classes)]
+    if best_model_name in final_preds:
+        y_true_bm, y_pred_bm, _ = final_preds[best_model_name]
+        fig_gen.f4b_confusion_matrix(
+            y_true_bm, y_pred_bm,
+            class_names=class_names_list,
+            model_name=best_model_name,
+        )
+        per_class = metrics_calc.get_per_class_metrics(y_true_bm, y_pred_bm)
+        fig_gen.f4c_per_class_metrics(per_class, model_name=best_model_name)
+
     # F7 suite — enhanced SHAP figures
     if shap_result is not None:
-        class_names = [idx_to_label.get(i, str(i)) for i in range(n_classes)]
         hr_imp = shap_hr.global_importance if shap_hr is not None else None
 
         shap_paths = fig_gen.generate_all_shap_figures(
@@ -779,7 +808,7 @@ def run_v2_pipeline(config_path: str):
             X=X_explain,
             global_importance=shap_result.global_importance,
             high_risk_importance=hr_imp,
-            class_names=class_names,
+            class_names=class_names_list,
             top_k=15,
         )
         logger.info(f"  SHAP figures saved: {list(shap_paths.keys())}")

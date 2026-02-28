@@ -846,6 +846,190 @@ class FigureGenerator:
         logger.info(f"Generated SHAP figures: {saved}")
         return paths
 
+    def f4b_confusion_matrix(
+        self,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        class_names: Optional[List[str]] = None,
+        model_name: str = "Best Model",
+    ) -> Optional[Path]:
+        """
+        F4b: Confusion matrix heatmap for one model.
+
+        Parameters
+        ----------
+        y_true, y_pred : np.ndarray
+            Integer-encoded ground-truth and predicted labels.
+        class_names : list of str, optional
+            Label for each class index.
+        model_name : str
+            Used in the figure title.
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        from sklearn.metrics import confusion_matrix as _cm
+
+        labels = sorted(np.unique(np.concatenate([y_true, y_pred])))
+        cm = _cm(y_true, y_pred, labels=labels)
+
+        if class_names is None:
+            class_names = [str(l) for l in labels]
+        else:
+            class_names = [class_names[l] if l < len(class_names) else str(l) for l in labels]
+
+        fig, ax = plt.subplots(figsize=(max(6, len(labels) * 0.9), max(5, len(labels) * 0.8)))
+
+        if SEABORN_AVAILABLE:
+            import seaborn as sns
+            df_cm = pd.DataFrame(cm, index=class_names, columns=class_names)
+            sns.heatmap(
+                df_cm, ax=ax, annot=True, fmt="d", cmap="Blues",
+                linewidths=0.4, cbar_kws={"label": "Count"},
+            )
+        else:
+            im = ax.imshow(cm, cmap="Blues", aspect="auto")
+            ax.set_xticks(range(len(class_names)))
+            ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=8)
+            ax.set_yticks(range(len(class_names)))
+            ax.set_yticklabels(class_names, fontsize=8)
+            plt.colorbar(im, ax=ax, label="Count")
+            for i in range(len(labels)):
+                for j in range(len(labels)):
+                    ax.text(j, i, str(cm[i, j]), ha="center", va="center", fontsize=8)
+
+        ax.set_xlabel("Predicted label", fontsize=10)
+        ax.set_ylabel("True label", fontsize=10)
+        ax.set_title(f"Confusion Matrix — {model_name}", fontsize=12)
+
+        plt.tight_layout()
+        output_path = self.output_dir / "F4b_confusion_matrix.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        plt.close()
+        logger.info(f"Saved F4b to {output_path}")
+        return output_path
+
+    def f4c_per_class_metrics(
+        self,
+        per_class_dict: Dict[str, Dict[str, float]],
+        model_name: str = "Best Model",
+    ) -> Optional[Path]:
+        """
+        F4c: Grouped bar chart of per-class precision / recall / F1.
+
+        Parameters
+        ----------
+        per_class_dict : dict
+            Output of MetricsCalculator.get_per_class_metrics():
+            { class_label: {'precision': float, 'recall': float, 'f1': float,
+                            'support': int} }
+        model_name : str
+            Used in the figure title.
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        classes = list(per_class_dict.keys())
+        precision = [per_class_dict[c]["precision"] for c in classes]
+        recall    = [per_class_dict[c]["recall"]    for c in classes]
+        f1        = [per_class_dict[c]["f1"]        for c in classes]
+        support   = [per_class_dict[c]["support"]   for c in classes]
+
+        x = np.arange(len(classes))
+        width = 0.26
+
+        fig, ax = plt.subplots(figsize=(max(9, len(classes) * 1.2), 5))
+        bars_p = ax.bar(x - width, precision, width, label="Precision", color="#4C72B0", alpha=0.85)
+        bars_r = ax.bar(x,          recall,    width, label="Recall",    color="#DD8452", alpha=0.85)
+        bars_f = ax.bar(x + width,  f1,        width, label="F1",        color="#55A868", alpha=0.85)
+
+        # Support counts as text above recall bar
+        for bar, sup in zip(bars_r, support):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.02,
+                f"n={sup}", ha="center", va="bottom", fontsize=7, color="gray",
+            )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(classes, rotation=40, ha="right", fontsize=9)
+        ax.set_ylim(0, 1.15)
+        ax.set_ylabel("Score")
+        ax.set_title(f"Per-Class Metrics — {model_name}")
+        ax.legend()
+        ax.grid(axis="y", alpha=0.3)
+
+        plt.tight_layout()
+        output_path = self.output_dir / "F4c_per_class_metrics.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        plt.close()
+        logger.info(f"Saved F4c to {output_path}")
+        return output_path
+
+    def f4d_severity_comparison(
+        self,
+        results_df: pd.DataFrame,
+    ) -> Optional[Path]:
+        """
+        F4d: Severity-focused metric comparison across all evaluated models.
+
+        Plots severe_fnr, severe_recall, severe_precision, and severe_f1
+        side-by-side for each model so the trade-offs are visible at a glance.
+
+        Parameters
+        ----------
+        results_df : pd.DataFrame
+            DataFrame with columns ['Model', 'severe_fnr', 'severe_recall',
+            'severe_precision', 'severe_f1'] plus optionally others.
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        severity_cols = ["severe_fnr", "severe_recall", "severe_precision", "severe_f1"]
+        avail = [c for c in severity_cols if c in results_df.columns]
+        if not avail:
+            logger.warning("No severity columns in results_df — skipping F4d")
+            return None
+
+        models = results_df["Model"].tolist() if "Model" in results_df.columns else list(results_df.index)
+        n_models = len(models)
+        n_metrics = len(avail)
+
+        x = np.arange(n_models)
+        width = 0.8 / n_metrics
+        colors = plt.cm.Set2(np.linspace(0, 0.9, n_metrics))
+
+        fig, ax = plt.subplots(figsize=(max(8, n_models * 1.8), 5))
+
+        for i, col in enumerate(avail):
+            vals = results_df[col].values
+            bars = ax.bar(x + i * width - (n_metrics - 1) * width / 2, vals,
+                          width, label=col.replace("_", " ").title(),
+                          color=colors[i], alpha=0.85)
+            for bar, v in zip(bars, vals):
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.01,
+                    f"{v:.2f}", ha="center", va="bottom", fontsize=8,
+                )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(models, rotation=30, ha="right", fontsize=10)
+        ax.set_ylim(0, 1.2)
+        ax.set_ylabel("Rate / Score")
+        ax.set_title("Severity-Focused Metrics by Model\n"
+                     "(lower FNR = fewer missed high-risk cases)")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.axhline(1.0, color="black", linewidth=0.5, linestyle="--", alpha=0.4)
+        ax.grid(axis="y", alpha=0.3)
+
+        plt.tight_layout()
+        output_path = self.output_dir / "F4d_severity_comparison.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        plt.close()
+        logger.info(f"Saved F4d to {output_path}")
+        return output_path
+
     def create_mermaid_flowchart(self) -> Path:
         """
         F1: Create Mermaid flowchart file.
