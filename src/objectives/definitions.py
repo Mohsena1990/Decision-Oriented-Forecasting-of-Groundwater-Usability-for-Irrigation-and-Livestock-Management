@@ -53,7 +53,8 @@ OBJECTIVE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
 
 HIGH_RISK_CLASSES = [
     'C4S1', 'C4S2', 'C4S3', 'C4S4',  # Very high salinity
-    'C3S3', 'C3S4'  # High salinity + high sodium
+    'C3S3', 'C3S4',                    # High salinity + high sodium
+    'Other',                           # Merged rare classes (includes C3S3/C3S4/C4S3/C4S4)
 ]
 
 
@@ -61,7 +62,10 @@ ORDINAL_ENCODING = {
     'C1S1': (1, 1), 'C1S2': (1, 2), 'C1S3': (1, 3), 'C1S4': (1, 4),
     'C2S1': (2, 1), 'C2S2': (2, 2), 'C2S3': (2, 3), 'C2S4': (2, 4),
     'C3S1': (3, 1), 'C3S2': (3, 2), 'C3S3': (3, 3), 'C3S4': (3, 4),
-    'C4S1': (4, 1), 'C4S2': (4, 2), 'C4S3': (4, 3), 'C4S4': (4, 4)
+    'C4S1': (4, 1), 'C4S2': (4, 2), 'C4S3': (4, 3), 'C4S4': (4, 4),
+    # "Other" contains merged rare classes (mostly C3S3/C3S4/C4S3/C4S4 + OG/C1S1/C2S2)
+    # Use (3, 3) as a conservative mid-high risk ordinal proxy for distance computation
+    'Other': (3, 3),
 }
 
 

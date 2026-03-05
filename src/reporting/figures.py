@@ -165,46 +165,85 @@ class FigureGenerator:
     def f4_model_comparison(
         self,
         results: pd.DataFrame,
-        metrics: List[str] = ['macro_f1', 'severe_fnr', 'ordinal_distance']
+        metrics: List[str] = ['macro_f1', 'severe_fnr', 'ordinal_distance_mean'],
+        best_model: Optional[str] = None,
     ) -> Path:
         """
-        F4: Model comparison bar chart.
+        F4: Model comparison bar chart with VIKOR winner highlighted.
 
         Args:
-            results: DataFrame with model results
+            results: DataFrame with model results (sorted by Rank ascending)
             metrics: Metrics to compare
+            best_model: Name of the VIKOR-selected best model (auto-detected from Rank=1 if None)
         """
         if not MATPLOTLIB_AVAILABLE:
             return None
 
-        n_metrics = len(metrics)
+        # Auto-detect best model from Rank column
+        if best_model is None and 'Rank' in results.columns:
+            best_model = results.loc[results['Rank'] == 1, 'Model'].iloc[0] \
+                if 'Model' in results.columns else None
+
+        # Filter to metrics that actually exist
+        available_metrics = [m for m in metrics if m in results.columns]
+        if not available_metrics:
+            available_metrics = [m for m in ['macro_f1', 'accuracy'] if m in results.columns]
+
+        n_metrics = len(available_metrics)
         n_models = len(results)
 
         fig, axes = plt.subplots(1, n_metrics, figsize=(4 * n_metrics, 6))
         if n_metrics == 1:
             axes = [axes]
 
-        colors = plt.cm.Set2(np.linspace(0, 1, n_models))
+        models = results['Model'].values if 'Model' in results.columns else results.index.astype(str)
 
-        for ax, metric in zip(axes, metrics):
-            if metric not in results.columns:
-                continue
+        # Colour: gold for winner, Set2 palette for others
+        base_colors = plt.cm.Set2(np.linspace(0, 1, n_models))
+        bar_colors = []
+        for m in models:
+            if m == best_model:
+                bar_colors.append('#FFD700')   # gold for VIKOR winner
+            else:
+                bar_colors.append(base_colors[list(models).index(m)])
 
+        # Metric display names and directionality labels
+        metric_labels = {
+            'macro_f1': ('Macro F1', 'higher is better'),
+            'severe_fnr': ('Severe FNR', 'lower is better ↓'),
+            'ordinal_distance_mean': ('Ordinal Distance', 'lower is better ↓'),
+            'accuracy': ('Accuracy', 'higher is better'),
+            'severe_recall': ('Severe Recall', 'higher is better'),
+        }
+
+        for ax, metric in zip(axes, available_metrics):
             values = results[metric].values
-            models = results['Model'].values if 'Model' in results else results.index
+            display_name, direction = metric_labels.get(metric, (metric.replace('_', ' ').title(), ''))
 
-            bars = ax.bar(range(n_models), values, color=colors)
+            bars = ax.bar(range(n_models), values, color=bar_colors)
             ax.set_xticks(range(n_models))
             ax.set_xticklabels(models, rotation=45, ha='right')
-            ax.set_ylabel(metric.replace('_', ' ').title())
-            ax.set_title(f'{metric.replace("_", " ").title()}')
+            ax.set_ylabel(display_name)
+            ax.set_title(f'{display_name}\n({direction})', fontsize=10)
 
             # Add value labels
             for bar, val in zip(bars, values):
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
-                       f'{val:.3f}', ha='center', va='bottom', fontsize=9)
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.005,
+                        f'{val:.3f}', ha='center', va='bottom', fontsize=9)
 
-        plt.suptitle('Model Performance Comparison', fontsize=14)
+            # Star annotation on winner bar
+            if best_model in list(models):
+                winner_idx = list(models).index(best_model)
+                winner_val = values[winner_idx]
+                ax.annotate(
+                    '★ VIKOR #1',
+                    xy=(winner_idx, winner_val),
+                    xytext=(winner_idx, winner_val + max(values) * 0.08),
+                    ha='center', fontsize=8, color='#B8860B', fontweight='bold',
+                    arrowprops=dict(arrowstyle='->', color='#B8860B', lw=1.2)
+                )
+
+        plt.suptitle('Model Performance Comparison\n(gold bar = VIKOR-selected best model)', fontsize=13)
         plt.tight_layout()
 
         output_path = self.output_dir / "F4_model_comparison.png"
@@ -1120,4 +1159,170 @@ flowchart TB
             f.write(mermaid_content)
 
         logger.info(f"Saved F1 (Mermaid) to {output_path}")
+        return output_path
+
+    # ------------------------------------------------------------------
+    # Classification result figures: ROC, PR, learning curves
+    # ------------------------------------------------------------------
+
+    def f_roc_curves(
+        self,
+        y_true: np.ndarray,
+        y_proba: np.ndarray,
+        class_names: Optional[List[str]] = None,
+        model_name: str = "Best Model",
+    ) -> Optional[Path]:
+        """
+        Multi-class ROC curves (one-vs-rest).
+
+        Plots AUC-ROC for each class and the macro-average.
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        from sklearn.metrics import roc_curve, auc
+        from sklearn.preprocessing import label_binarize
+
+        n_classes = y_proba.shape[1]
+        classes = list(range(n_classes))
+        if class_names is None:
+            class_names = [str(c) for c in classes]
+
+        y_bin = label_binarize(y_true, classes=classes)
+        if n_classes == 2:
+            y_bin = np.hstack([1 - y_bin, y_bin])
+
+        fig, ax = plt.subplots(figsize=(9, 7))
+        colors = plt.cm.tab10(np.linspace(0, 1, n_classes))
+
+        macro_tpr_interp = np.zeros(100)
+        base_fpr = np.linspace(0, 1, 100)
+        valid_classes = 0
+
+        for i, (cls_name, color) in enumerate(zip(class_names, colors)):
+            if y_bin[:, i].sum() == 0:
+                continue
+            fpr, tpr, _ = roc_curve(y_bin[:, i], y_proba[:, i])
+            roc_auc = auc(fpr, tpr)
+            ax.plot(fpr, tpr, color=color, lw=1.5,
+                    label=f"{cls_name} (AUC={roc_auc:.2f})")
+            macro_tpr_interp += np.interp(base_fpr, fpr, tpr)
+            valid_classes += 1
+
+        if valid_classes > 0:
+            macro_tpr_interp /= valid_classes
+            macro_auc = auc(base_fpr, macro_tpr_interp)
+            ax.plot(base_fpr, macro_tpr_interp, 'k--', lw=2.5,
+                    label=f"Macro avg (AUC={macro_auc:.2f})")
+
+        ax.plot([0, 1], [0, 1], 'gray', lw=1, linestyle=':')
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.set_title(f"ROC Curves (One-vs-Rest) — {model_name}")
+        ax.legend(loc="lower right", fontsize=8)
+        ax.grid(alpha=0.3)
+
+        plt.tight_layout()
+        output_path = self.output_dir / "F_roc_curves.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        plt.close()
+        logger.info(f"Saved ROC curves to {output_path}")
+        return output_path
+
+    def f_pr_curves(
+        self,
+        y_true: np.ndarray,
+        y_proba: np.ndarray,
+        class_names: Optional[List[str]] = None,
+        model_name: str = "Best Model",
+    ) -> Optional[Path]:
+        """
+        Multi-class Precision-Recall curves (one-vs-rest).
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        from sklearn.metrics import precision_recall_curve, average_precision_score
+        from sklearn.preprocessing import label_binarize
+
+        n_classes = y_proba.shape[1]
+        classes = list(range(n_classes))
+        if class_names is None:
+            class_names = [str(c) for c in classes]
+
+        y_bin = label_binarize(y_true, classes=classes)
+        if n_classes == 2:
+            y_bin = np.hstack([1 - y_bin, y_bin])
+
+        fig, ax = plt.subplots(figsize=(9, 7))
+        colors = plt.cm.tab10(np.linspace(0, 1, n_classes))
+
+        for i, (cls_name, color) in enumerate(zip(class_names, colors)):
+            if y_bin[:, i].sum() == 0:
+                continue
+            precision, recall, _ = precision_recall_curve(y_bin[:, i], y_proba[:, i])
+            ap = average_precision_score(y_bin[:, i], y_proba[:, i])
+            ax.plot(recall, precision, color=color, lw=1.5,
+                    label=f"{cls_name} (AP={ap:.2f})")
+
+        ax.set_xlabel("Recall")
+        ax.set_ylabel("Precision")
+        ax.set_title(f"Precision-Recall Curves (One-vs-Rest) — {model_name}")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(alpha=0.3)
+
+        plt.tight_layout()
+        output_path = self.output_dir / "F_pr_curves.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        plt.close()
+        logger.info(f"Saved PR curves to {output_path}")
+        return output_path
+
+    def f_learning_curves(
+        self,
+        training_history: Dict[str, list],
+        model_name: str = "Best Model",
+    ) -> Optional[Path]:
+        """
+        Training / validation loss learning curves over epochs.
+
+        Parameters
+        ----------
+        training_history : dict
+            {'train_loss': [...], 'val_loss': [...]} from model.training_history
+        model_name : str
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        train_loss = training_history.get('train_loss', [])
+        val_loss = training_history.get('val_loss', [])
+
+        if not train_loss:
+            logger.warning("No training history to plot")
+            return None
+
+        fig, ax = plt.subplots(figsize=(9, 5))
+        epochs = range(1, len(train_loss) + 1)
+        ax.plot(epochs, train_loss, 'b-', lw=2, label='Training loss')
+
+        if val_loss:
+            val_epochs = range(1, len(val_loss) + 1)
+            ax.plot(val_epochs, val_loss, 'r--', lw=2, label='Validation loss')
+            # Mark early-stopping point
+            best_epoch = int(np.argmin(val_loss)) + 1
+            ax.axvline(best_epoch, color='green', lw=1, linestyle=':', alpha=0.8,
+                       label=f'Best epoch ({best_epoch})')
+
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Cross-Entropy Loss")
+        ax.set_title(f"Learning Curves — {model_name}")
+        ax.legend()
+        ax.grid(alpha=0.3)
+
+        plt.tight_layout()
+        output_path = self.output_dir / "F_learning_curves.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        plt.close()
+        logger.info(f"Saved learning curves to {output_path}")
         return output_path

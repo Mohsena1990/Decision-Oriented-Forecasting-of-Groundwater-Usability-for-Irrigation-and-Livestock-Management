@@ -209,6 +209,7 @@ class LSTMForecaster(BaseForecaster):
         patience = self.config.params.get('patience', 20)
         best_val_loss = float('inf')
         patience_counter = 0
+        self.training_history: Dict[str, list] = {'train_loss': [], 'val_loss': []}
 
         for epoch in range(max_epochs):
             self._network.train()
@@ -227,6 +228,8 @@ class LSTMForecaster(BaseForecaster):
 
                 train_loss += loss.item()
 
+            self.training_history['train_loss'].append(train_loss / len(train_loader))
+
             # Validation
             if val_loader is not None:
                 self._network.eval()
@@ -242,9 +245,12 @@ class LSTMForecaster(BaseForecaster):
                         loss = criterion(outputs, targets)
                         val_loss += loss.item()
 
+                avg_val_loss = val_loss / len(val_loader)
+                self.training_history['val_loss'].append(avg_val_loss)
+
                 # Early stopping
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
                     patience_counter = 0
                 else:
                     patience_counter += 1

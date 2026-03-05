@@ -91,7 +91,7 @@ data_quality:
     drop_empty_columns: true
     resolve_label_typos: true
     handle_rare_classes: "merge"  # "merge" to Other or "drop"
-    rare_class_threshold: 5  # Minimum samples per class
+    rare_class_threshold: 10  # Minimum samples per class (combined across all years)
 
 # -----------------------------------------------------------------------------
 # LABEL CONFIGURATION
@@ -112,14 +112,13 @@ labels:
   c_order: [1, 2, 3, 4]  # C1=excellent to C4=very high salinity
   s_order: [1, 2, 3, 4]  # S1=excellent to S4=very high sodium
 
-  # High-risk class definition (for severity metrics)
+  # High-risk class definition (for severity metrics).
+  # Note: C4S3, C4S4, C3S3, C3S4 are merged into "Other" when rare_class_threshold>=10,
+  # so only C4S1, C4S2 (and "Other" as partial high-risk) are kept here.
   high_risk_classes:
     - "C4S1"
     - "C4S2"
-    - "C4S3"
-    - "C4S4"
-    - "C3S3"
-    - "C3S4"
+    - "Other"  # Contains merged high-risk classes (C3S3, C3S4, C4S3, C4S4)
 
   # Ordinal distance weights
   ordinal_weights:
@@ -314,8 +313,8 @@ optimization:
   algorithm: "pso_gwo"
 
   # Population and iterations
-  population_size: 30
-  max_iterations: 50
+  population_size: 10
+  max_iterations: 20
 
   # PSO parameters
   pso:

@@ -210,6 +210,7 @@ class GRUForecaster(BaseForecaster):
         best_val_loss = float('inf')
         patience_counter = 0
         log_interval = max(1, max_epochs // 10)  # Log ~10 times during training
+        self.training_history: Dict[str, list] = {'train_loss': [], 'val_loss': []}
 
         for epoch in range(max_epochs):
             self._network.train()
@@ -228,6 +229,9 @@ class GRUForecaster(BaseForecaster):
 
                 train_loss += loss.item()
 
+            avg_train_loss = train_loss / len(train_loader)
+            self.training_history['train_loss'].append(avg_train_loss)
+
             # Validation
             if val_loader is not None:
                 self._network.eval()
@@ -243,15 +247,16 @@ class GRUForecaster(BaseForecaster):
                         loss = criterion(outputs, targets)
                         val_loss += loss.item()
 
+                avg_val_loss = val_loss / len(val_loader)
+                self.training_history['val_loss'].append(avg_val_loss)
+
                 # Log progress periodically
                 if (epoch + 1) % log_interval == 0:
-                    avg_train_loss = train_loss / len(train_loader)
-                    avg_val_loss = val_loss / len(val_loader)
                     logger.debug(f"Epoch {epoch + 1}/{max_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}")
 
                 # Early stopping
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
                     patience_counter = 0
                 else:
                     patience_counter += 1

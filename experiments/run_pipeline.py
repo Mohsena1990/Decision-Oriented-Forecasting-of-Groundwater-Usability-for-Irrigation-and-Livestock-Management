@@ -770,19 +770,26 @@ def run_pipeline(config_path: str):
         if explain_config.get('tree_shap', {}).get('enabled', True):
             try:
                 max_samples = explain_config.get('tree_shap', {}).get('max_samples', 1000)
-                shap_explainer = TreeSHAPExplainer(model=best_model)
+                shap_explainer = TreeSHAPExplainer(
+                    max_samples=max_samples,
+                    top_k_features=10
+                )
 
                 X_sample = X_test_shap[:min(max_samples, len(X_test_shap))]
-                shap_values = shap_explainer.explain(X_sample)
+                shap_result_obj = shap_explainer.explain(best_model, X_sample, selected_feature_names)
 
-                importance = shap_explainer.get_feature_importance(shap_values, selected_feature_names)
+                importance_dict = dict(zip(
+                    shap_result_obj.global_importance['feature'],
+                    shap_result_obj.global_importance['importance']
+                ))
                 shap_results = {
                     'method': 'TreeSHAP',
-                    'values': shap_values,
-                    'importance': importance
+                    'shap_result': shap_result_obj,
+                    'values': shap_result_obj.shap_values,
+                    'importance': importance_dict
                 }
 
-                logger.info(f"Top SHAP features: {list(importance.items())[:10]}")
+                logger.info(f"Top SHAP features: {list(importance_dict.items())[:10]}")
             except Exception as e:
                 logger.warning(f"TreeSHAP failed: {e}")
 
@@ -791,26 +798,26 @@ def run_pipeline(config_path: str):
         if explain_config.get('surrogate', {}).get('enabled', True):
             try:
                 surrogate_explainer = SurrogateExplainer(
-                    original_model=best_model,
                     surrogate_type=explain_config.get('surrogate', {}).get('surrogate_model', 'lightgbm')
                 )
 
-                surrogate_explainer.fit(X_train[:, best_feature_mask] if best_feature_mask is not None else X_train,
-                                        y_train)
-
                 X_sample = X_test_shap[:min(500, len(X_test_shap))]
-                shap_values, fidelity = surrogate_explainer.explain(X_sample)
+                surrogate_result = surrogate_explainer.explain(best_model, X_sample, selected_feature_names)
 
-                importance = surrogate_explainer.get_feature_importance(shap_values, selected_feature_names)
+                importance_dict = dict(zip(
+                    surrogate_result.shap_result.global_importance['feature'],
+                    surrogate_result.shap_result.global_importance['importance']
+                ))
                 shap_results = {
                     'method': 'Surrogate SHAP',
-                    'values': shap_values,
-                    'importance': importance,
-                    'fidelity': fidelity
+                    'shap_result': surrogate_result.shap_result,
+                    'values': surrogate_result.shap_result.shap_values,
+                    'importance': importance_dict,
+                    'fidelity': surrogate_result.fidelity_metrics
                 }
 
-                logger.info(f"Surrogate fidelity: {fidelity}")
-                logger.info(f"Top SHAP features: {list(importance.items())[:10]}")
+                logger.info(f"Surrogate fidelity: {surrogate_result.fidelity_metrics}")
+                logger.info(f"Top SHAP features: {list(importance_dict.items())[:10]}")
             except Exception as e:
                 logger.warning(f"Surrogate SHAP failed: {e}")
 
@@ -823,31 +830,43 @@ def run_pipeline(config_path: str):
     scenario_results = {}
 
     try:
+        feature_mapping = {name: i for i, name in enumerate(selected_feature_names)}
         scenario_engine = ScenarioEngine(
-            model=best_model,
-            feature_names=selected_feature_names,
+            feature_mapping=feature_mapping,
             high_risk_indices=high_risk_idx
         )
 
         # Run TDS scenarios
-        if 'tds' in scenario_config:
+        if 'tds' in scenario_config and 'TDS' in feature_mapping:
             for pct in scenario_config['tds'].get('perturbations', [0.1, 0.2]):
-                scenario_name = f"TDS_+{int(pct*100)}%"
-                impact = scenario_engine.run_perturbation_scenario(
-                    X_test_shap, 'TDS', pct, direction='increase'
+                result = scenario_engine.simulate_percentage_change(
+                    best_model, X_test_shap, 'TDS', pct, direction='increase'
                 )
-                scenario_results[scenario_name] = impact
-                logger.info(f"{scenario_name}: Risk change = {impact.get('risk_change', 'N/A')}")
+                scenario_name = f"TDS_+{int(pct*100)}%"
+                scenario_results[scenario_name] = {
+                    'risk_change': float(np.mean(result.high_risk_prob_change)),
+                    'scenario_name': result.scenario_name,
+                    'pct_class_changed': float(
+                        np.mean(result.baseline_predictions != result.scenario_predictions) * 100
+                    )
+                }
+                logger.info(f"{scenario_name}: Risk change = {scenario_results[scenario_name]['risk_change']:.4f}")
 
         # Run SAR scenarios
-        if 'sar' in scenario_config:
+        if 'sar' in scenario_config and 'SAR' in feature_mapping:
             for pct in scenario_config['sar'].get('perturbations', [0.1]):
-                scenario_name = f"SAR_+{int(pct*100)}%"
-                impact = scenario_engine.run_perturbation_scenario(
-                    X_test_shap, 'SAR', pct, direction='increase'
+                result = scenario_engine.simulate_percentage_change(
+                    best_model, X_test_shap, 'SAR', pct, direction='increase'
                 )
-                scenario_results[scenario_name] = impact
-                logger.info(f"{scenario_name}: Risk change = {impact.get('risk_change', 'N/A')}")
+                scenario_name = f"SAR_+{int(pct*100)}%"
+                scenario_results[scenario_name] = {
+                    'risk_change': float(np.mean(result.high_risk_prob_change)),
+                    'scenario_name': result.scenario_name,
+                    'pct_class_changed': float(
+                        np.mean(result.baseline_predictions != result.scenario_predictions) * 100
+                    )
+                }
+                logger.info(f"{scenario_name}: Risk change = {scenario_results[scenario_name]['risk_change']:.4f}")
 
     except Exception as e:
         logger.warning(f"Scenario simulation failed: {e}")
@@ -896,8 +915,12 @@ def run_pipeline(config_path: str):
     # F3: Temporal schematic
     fig_gen.f3_temporal_forecasting_schematic()
 
-    # F4: Model comparison (all 4 models)
-    fig_gen.f4_model_comparison(results_df, metrics=['macro_f1', 'accuracy'])
+    # F4: Model comparison (all 4 models) — show decision-relevant metrics + VIKOR winner
+    fig_gen.f4_model_comparison(
+        results_df,
+        metrics=['macro_f1', 'severe_fnr', 'ordinal_distance_mean'],
+        best_model=best_model_name
+    )
 
     # F5: Pareto fronts
     try:
@@ -911,12 +934,70 @@ def run_pipeline(config_path: str):
     except Exception as e:
         logger.warning(f"VIKOR ranking figure failed: {e}")
 
-    # F7: SHAP summary
+    # F7: SHAP summary + extended SHAP figures (F7b beeswarm, F7d dependence)
     if shap_results:
         try:
             fig_gen.f7_shap_summary(shap_results['importance'], selected_feature_names)
         except Exception as e:
             logger.warning(f"SHAP summary figure failed: {e}")
+
+        if 'shap_result' in shap_results:
+            try:
+                class_names = [idx_to_label.get(i, str(i)) for i in sorted(idx_to_label.keys())]
+                fig_gen.generate_all_shap_figures(
+                    shap_results['shap_result'],
+                    X_test_shap,
+                    high_risk_importance=None,
+                    class_names=class_names,
+                    top_k=min(15, len(selected_feature_names))
+                )
+            except Exception as e:
+                logger.warning(f"Extended SHAP figures failed: {e}")
+
+    # F4b: Confusion matrix for best model
+    try:
+        y_pred_best = best_model.predict(X_test_shap)
+        class_names_list = [idx_to_label.get(i, str(i)) for i in sorted(idx_to_label.keys())]
+        fig_gen.f4b_confusion_matrix(y_test, y_pred_best, class_names_list, model_name=best_model_name)
+    except Exception as e:
+        logger.warning(f"Confusion matrix figure failed: {e}")
+
+    # F4c: Per-class metrics for best model
+    try:
+        metrics_best = metrics_calc.compute_all(y_test, y_pred_best, best_model.predict_proba(X_test_shap))
+        per_class = metrics_calc.get_per_class_metrics(y_test, y_pred_best)
+        if per_class:
+            labeled_per_class = {idx_to_label.get(k, str(k)): v for k, v in per_class.items()}
+            fig_gen.f4c_per_class_metrics(labeled_per_class, model_name=best_model_name)
+    except Exception as e:
+        logger.warning(f"Per-class metrics figure failed: {e}")
+
+    # F4d: Severity comparison across all models
+    try:
+        fig_gen.f4d_severity_comparison(results_df)
+    except Exception as e:
+        logger.warning(f"Severity comparison figure failed: {e}")
+
+    # ROC curves for best model
+    try:
+        y_proba_best = best_model.predict_proba(X_test_shap)
+        class_names_roc = [idx_to_label.get(i, str(i)) for i in sorted(idx_to_label.keys())]
+        fig_gen.f_roc_curves(y_test, y_proba_best, class_names_roc, model_name=best_model_name)
+    except Exception as e:
+        logger.warning(f"ROC curves figure failed: {e}")
+
+    # Precision-Recall curves for best model
+    try:
+        fig_gen.f_pr_curves(y_test, y_proba_best, class_names_roc, model_name=best_model_name)
+    except Exception as e:
+        logger.warning(f"PR curves figure failed: {e}")
+
+    # Learning curves for deep models
+    if best_model_name in ['LSTM', 'GRU'] and hasattr(best_model, 'training_history'):
+        try:
+            fig_gen.f_learning_curves(best_model.training_history, model_name=best_model_name)
+        except Exception as e:
+            logger.warning(f"Learning curves figure failed: {e}")
 
     # Generate tables
     table_gen = TableGenerator(output_dir=paper_output_dir / 'tables')
