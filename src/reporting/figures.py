@@ -1326,3 +1326,193 @@ flowchart TB
         plt.close()
         logger.info(f"Saved learning curves to {output_path}")
         return output_path
+
+    # ------------------------------------------------------------------
+    # F8: Scenario Simulation
+    # ------------------------------------------------------------------
+
+    def f8_scenario_simulation(
+        self,
+        scenario_results: Dict[str, Any],
+        class_names: Optional[List[str]] = None,
+        idx_to_label: Optional[Dict[int, str]] = None,
+        high_risk_indices: Optional[List[int]] = None
+    ) -> List[Path]:
+        """
+        F8: Scenario simulation impact figures.
+
+        Generates three sub-figures:
+          F8a – Risk change bar chart (mean high-risk probability change per scenario)
+          F8b – Class shift heat-map  (% of samples that changed class per scenario)
+          F8c – Transition matrix for the scenario with the largest risk change
+
+        Args:
+            scenario_results : dict of scenario_name -> ScenarioResult
+            class_names      : ordered list of class label strings
+            idx_to_label     : mapping from int index to label string
+            high_risk_indices: list of high-risk class indices
+
+        Returns:
+            List of saved figure paths
+        """
+        if not MATPLOTLIB_AVAILABLE or not scenario_results:
+            logger.warning("Cannot generate F8 — matplotlib unavailable or no scenarios")
+            return []
+
+        paths = []
+        scenario_names = list(scenario_results.keys())
+
+        # ---- F8a: Risk change bar chart --------------------------------
+        risk_changes = []
+        pct_changed = []
+        for name, result in scenario_results.items():
+            risk_changes.append(float(np.mean(result.high_risk_prob_change)))
+            pct_changed.append(
+                float(np.mean(result.baseline_predictions != result.scenario_predictions) * 100)
+            )
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+        colors_risk = ['#d62728' if v > 0 else '#2ca02c' for v in risk_changes]
+        axes[0].barh(scenario_names, risk_changes, color=colors_risk, edgecolor='black', linewidth=0.5)
+        axes[0].axvline(0, color='black', lw=0.8, linestyle='--')
+        axes[0].set_xlabel("Mean Δ High-Risk Probability")
+        axes[0].set_title("F8a — High-Risk Probability Change per Scenario")
+        axes[0].grid(axis='x', alpha=0.3)
+        for i, v in enumerate(risk_changes):
+            axes[0].text(v + 0.001 * np.sign(v) if v != 0 else 0.001, i,
+                         f"{v:+.4f}", va='center', fontsize=8)
+
+        colors_chg = plt.cm.OrRd(np.array(pct_changed) / (max(pct_changed) + 1e-9))
+        axes[1].barh(scenario_names, pct_changed, color=colors_chg, edgecolor='black', linewidth=0.5)
+        axes[1].set_xlabel("% Samples with Class Change")
+        axes[1].set_title("F8b — Class Change Rate per Scenario")
+        axes[1].grid(axis='x', alpha=0.3)
+        for i, v in enumerate(pct_changed):
+            axes[1].text(v + 0.1, i, f"{v:.1f}%", va='center', fontsize=8)
+
+        plt.tight_layout()
+        p = self.output_dir / "F8a_scenario_risk_change.png"
+        plt.savefig(p, dpi=self.dpi, bbox_inches='tight')
+        plt.close()
+        paths.append(p)
+        logger.info(f"Saved F8a to {p}")
+
+        # ---- F8c: Transition matrix for highest-impact scenario -------
+        if scenario_results:
+            max_idx = int(np.argmax(np.abs(risk_changes)))
+            max_name = scenario_names[max_idx]
+            max_result = scenario_results[max_name]
+            tm = max_result.transition_matrix
+
+            if tm is not None and tm.size > 0:
+                n_cls = tm.shape[0]
+                labels = class_names if class_names and len(class_names) == n_cls else [str(i) for i in range(n_cls)]
+
+                fig, ax = plt.subplots(figsize=(max(6, n_cls), max(5, n_cls - 1)))
+                # Row-normalise
+                row_sums = tm.sum(axis=1, keepdims=True)
+                row_sums[row_sums == 0] = 1
+                tm_norm = tm / row_sums
+
+                if SEABORN_AVAILABLE:
+                    import seaborn as sns
+                    sns.heatmap(
+                        tm_norm, annot=tm, fmt='d',
+                        xticklabels=labels, yticklabels=labels,
+                        cmap='YlOrRd', ax=ax,
+                        linewidths=0.5, linecolor='gray'
+                    )
+                else:
+                    im = ax.imshow(tm_norm, cmap='YlOrRd', aspect='auto')
+                    plt.colorbar(im, ax=ax)
+                    ax.set_xticks(range(n_cls))
+                    ax.set_xticklabels(labels, rotation=45, ha='right')
+                    ax.set_yticks(range(n_cls))
+                    ax.set_yticklabels(labels)
+                    for i in range(n_cls):
+                        for j in range(n_cls):
+                            ax.text(j, i, str(tm[i, j]), ha='center', va='center', fontsize=8)
+
+                ax.set_xlabel("Scenario Prediction")
+                ax.set_ylabel("Baseline Prediction")
+                ax.set_title(f"F8c — Class Transition Matrix\n(Scenario: {max_name})")
+                plt.tight_layout()
+                p = self.output_dir / "F8c_transition_matrix.png"
+                plt.savefig(p, dpi=self.dpi, bbox_inches='tight')
+                plt.close()
+                paths.append(p)
+                logger.info(f"Saved F8c to {p}")
+
+        return paths
+
+    # ------------------------------------------------------------------
+    # F9: Imbalance handling (before / after class distribution)
+    # ------------------------------------------------------------------
+
+    def f9_imbalance_handling(
+        self,
+        y_before: np.ndarray,
+        y_after: np.ndarray,
+        idx_to_label: Optional[Dict[int, str]] = None,
+        strategy: str = ""
+    ) -> Path:
+        """
+        F9: Side-by-side class distribution before and after resampling.
+
+        Args:
+            y_before     : original training labels
+            y_after      : resampled training labels
+            idx_to_label : mapping from int index to label string
+            strategy     : name of the resampling strategy used
+
+        Returns:
+            Path to saved figure
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        def _count(y):
+            cls, cnt = np.unique(y, return_counts=True)
+            return {int(c): int(n) for c, n in zip(cls, cnt)}
+
+        before = _count(y_before)
+        after = _count(y_after)
+        all_classes = sorted(set(before) | set(after))
+        labels = [idx_to_label.get(c, str(c)) if idx_to_label else str(c) for c in all_classes]
+
+        b_counts = [before.get(c, 0) for c in all_classes]
+        a_counts = [after.get(c, 0) for c in all_classes]
+
+        x = np.arange(len(all_classes))
+        width = 0.35
+
+        fig, ax = plt.subplots(figsize=(max(8, len(all_classes) * 0.8), 5))
+        bars_b = ax.bar(x - width / 2, b_counts, width, label='Before resampling', color='#4c72b0', alpha=0.85)
+        bars_a = ax.bar(x + width / 2, a_counts, width, label='After resampling', color='#dd8452', alpha=0.85)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=9)
+        ax.set_ylabel("Sample Count")
+        ax.set_title(f"F9 — Class Distribution Before vs After Resampling\n(Strategy: {strategy})")
+        ax.legend()
+        ax.grid(axis='y', alpha=0.3)
+
+        # Annotate bars
+        for bar in bars_b:
+            h = bar.get_height()
+            if h > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, h + 0.5, str(h),
+                        ha='center', va='bottom', fontsize=7)
+        for bar in bars_a:
+            h = bar.get_height()
+            if h > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, h + 0.5, str(h),
+                        ha='center', va='bottom', fontsize=7)
+
+        plt.tight_layout()
+        output_path = self.output_dir / "F9_imbalance_handling.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Saved F9 to {output_path}")
+        return output_path

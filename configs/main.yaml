@@ -181,16 +181,21 @@ preprocessing:
 # IMBALANCE HANDLING
 # -----------------------------------------------------------------------------
 imbalance:
-  strategy: "class_weights"  # "class_weights", "smote", "none"
+  # Resampling strategy applied to training data before optimization.
+  # Options: smote_tomek | borderline_smote | adasyn | smote | ctgan | class_weights | none
+  strategy: "smote_tomek"
 
-  # Class weights options
+  # Class weights are ALWAYS computed and passed to model loss functions.
   class_weights:
-    method: "balanced"  # "balanced", "custom"
+    method: "balanced"  # "balanced" (sklearn-style) | "sqrt" (less aggressive)
 
-  # SMOTE options (if used)
+  # SMOTE / BorderlineSMOTE / ADASYN options
   smote:
     k_neighbors: 5
-    sampling_strategy: "auto"
+
+  # CTGAN options (only used when strategy = "ctgan")
+  gan:
+    epochs: 300
 
 # -----------------------------------------------------------------------------
 # CROSS-VALIDATION & EVALUATION

@@ -8,13 +8,12 @@ Pipeline Stages:
     A. Data Ingestion + Harmonization
     B. Transition Building
     C. Data Quality Validation
-    D. Preprocessing
-    E. Feature Selection (Filter Warm-Start)
-    F. PSO-GWO Multi-Objective Optimization (for all 4 models)
-    G. VIKOR Model Selection (two-level)
-    H. SHAP Explainability
-    I. Scenario Simulation
-    J. Paper Outputs
+    D. Preprocessing + Imbalance Handling
+    E. PSO-GWO Multi-Objective Optimization (for all 4 models)
+    F. VIKOR Model Selection (two-level)
+    G. SHAP Explainability
+    H. Scenario Simulation
+    I. Paper Outputs (figures, tables, animations)
 
 Usage:
     python -m experiments.run_pipeline --config configs/main.yaml
@@ -42,7 +41,6 @@ from src.data_quality import DataQualityValidator, DataCleaner, DataQualityRepor
 from src.preprocessing import PreprocessingPipeline, LabelParser, OrdinalEncoder
 from src.evaluation import TemporalSplitter, CrossValidator, MetricsCalculator
 from src.imbalance import ImbalanceHandler
-from src.feature_selection import FilterSelector
 
 # All 4 models
 from src.models.trees import CatBoostForecaster, LightGBMForecaster
@@ -229,7 +227,6 @@ def get_gru_search_space(n_features: int):
 
 def get_lstm_search_space(n_features: int):
     """Get search space for LSTM."""
-    # Same as GRU
     return get_gru_search_space(n_features)
 
 
@@ -246,93 +243,47 @@ def create_objective_function(
     param_bounds: Dict[str, Tuple[float, float]],
     param_types: Dict[str, str],
     n_features: int,
-    include_feature_selection: bool = True,
     categorical_indices: Optional[List[int]] = None
 ) -> Callable[[np.ndarray], np.ndarray]:
     """
     Create objective function for PSO-GWO optimization.
-
-    Args:
-        X_train: Training features
-        y_train: Training labels
-        model_factory: Function to create model instances
-        calculator: ObjectiveCalculator instance
-        cv_splits: Pre-computed CV splits
-        param_bounds: Parameter bounds
-        param_types: Parameter types
-        n_features: Number of features
-        include_feature_selection: Whether to include feature selection
-        categorical_indices: Indices of categorical features (for deep models)
-
-    Returns:
-        Objective function that takes position and returns objectives
+    Feature selection is disabled — all features are always used.
     """
-    # Create dimension mapping
     lower, upper, mapping = create_search_space(
-        param_bounds, n_features, include_feature_mask=include_feature_selection
+        param_bounds, n_features, include_feature_mask=False
     )
 
     def objective_fn(position: np.ndarray) -> np.ndarray:
-        # Decode position
-        params, feature_mask = decode_position(position, mapping, param_types)
+        params, _ = decode_position(position, mapping, param_types)
 
-        # Apply feature mask
-        if include_feature_selection and feature_mask.sum() > 0:
-            selected_features = feature_mask.astype(bool)
-            X_masked = X_train[:, selected_features]
-            n_selected = int(feature_mask.sum())
-
-            # Adjust categorical indices for masked features
-            if categorical_indices:
-                cat_idx_masked = []
-                original_idx = 0
-                for i, selected in enumerate(selected_features):
-                    if selected:
-                        if i in categorical_indices:
-                            cat_idx_masked.append(original_idx)
-                        original_idx += 1
-            else:
-                cat_idx_masked = None
-        else:
-            X_masked = X_train
-            n_selected = n_features
-            cat_idx_masked = categorical_indices
-
-        # Cross-validation evaluation
         all_objectives = []
 
         for train_idx, val_idx in cv_splits:
-            X_tr, X_val = X_masked[train_idx], X_masked[val_idx]
+            X_tr, X_val = X_train[train_idx], X_train[val_idx]
             y_tr, y_val = y_train[train_idx], y_train[val_idx]
 
             try:
-                # Create and train model
                 model = model_factory(params)
 
-                # For deep models, pass categorical indices
                 if hasattr(model, '_categorical_indices_hint'):
-                    model.fit(X_tr, y_tr, X_val, y_val, categorical_features=cat_idx_masked)
+                    model.fit(X_tr, y_tr, X_val, y_val, categorical_features=categorical_indices)
                 else:
                     model.fit(X_tr, y_tr, X_val, y_val)
 
-                # Predict
                 y_pred = model.predict(X_val)
                 y_proba = model.predict_proba(X_val)
 
-                # Compute objectives
                 objectives = calculator.compute_objectives(
                     y_val, y_pred, y_proba,
-                    n_features=n_selected,
+                    n_features=n_features,
                     model_complexity=model.get_model_complexity()
                 )
                 all_objectives.append(objectives)
 
             except Exception as e:
                 logger.warning(f"CV fold failed: {e}")
-                # Return worst-case objectives
                 all_objectives.append(np.array([10.0, 1.0, 1.0, 1.0]))
 
-        # Average across folds
         return np.mean(all_objectives, axis=0)
 
     return objective_fn, lower, upper, mapping
@@ -343,16 +294,9 @@ def create_objective_function(
 # =============================================================================
 
 def run_pipeline(config_path: str):
-    """
-    Run the complete forecasting pipeline.
-
-    Args:
-        config_path: Path to configuration YAML file
-    """
-    # Load configuration
+    """Run the complete forecasting pipeline."""
     config = load_config(config_path)
 
-    # Setup
     setup_logging(
         level=get_config_value(config, 'logging', 'level', default='INFO'),
         log_file=get_config_value(config, 'output', 'logs', default='outputs/logs') + '/pipeline.log'
@@ -364,7 +308,6 @@ def run_pipeline(config_path: str):
     logger.info("GROUNDWATER QUALITY FORECASTING PIPELINE")
     logger.info("=" * 60)
 
-    # Create output directories
     output_dir = Path(get_config_value(config, 'output', 'base_dir', default='outputs'))
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -379,8 +322,6 @@ def run_pipeline(config_path: str):
     data_config = config.get('data', {})
     base_dir = data_config.get('base_dir')
     files = data_config.get('files', {})
-
-    # Convert year keys to integers
     files_int = {int(k): v for k, v in files.items()}
 
     ingestion = DataIngestion(base_dir=base_dir, files=files_int)
@@ -429,16 +370,13 @@ def run_pipeline(config_path: str):
         rare_class_threshold=dq_config.get('cleaning', {}).get('rare_class_threshold', 5)
     )
 
-    # Clean data (fit on 2018)
     cleaned_data = cleaner.clean_all(data, fit_year=2018)
     label_encoder = cleaner.get_label_encoder()
 
     logger.info(f"Label encoder: {label_encoder}")
 
-    # Build transitions from cleaned data
     transitions = transition_builder.build_all_transitions(cleaned_data, target_col='Classification')
 
-    # Temporal split
     eval_config = config.get('evaluation', {})
     splitter = TemporalSplitter(
         train_transitions=eval_config.get('temporal_split', {}).get('train_transitions', ['2018_2019']),
@@ -448,7 +386,6 @@ def run_pipeline(config_path: str):
     train_df, test_df = splitter.split(transitions)
     logger.info(f"Train samples: {len(train_df)}, Test samples: {len(test_df)}")
 
-    # Setup preprocessing pipeline
     preproc_config = config.get('preprocessing', {})
     pipeline = PreprocessingPipeline(
         numeric_features=preproc_config.get('numeric_features', []),
@@ -458,11 +395,9 @@ def run_pipeline(config_path: str):
         target_column='Classification_target'
     )
 
-    # Fit on training, transform both
     X_train, y_train, feature_names = pipeline.fit_transform(train_df, scale_features=True)
     X_test, y_test, _ = pipeline.transform(test_df, scale_features=True)
 
-    # Handle missing targets
     train_mask = y_train >= 0
     test_mask = y_test >= 0 if y_test is not None else np.ones(len(X_test), dtype=bool)
 
@@ -472,34 +407,45 @@ def run_pipeline(config_path: str):
     logger.info(f"Final shapes - Train: {X_train.shape}, Test: {X_test.shape}")
     logger.info(f"Classes: {np.unique(y_train)}")
 
-    # Get categorical feature indices
     categorical_indices = pipeline.get_categorical_indices() if hasattr(pipeline, 'get_categorical_indices') else []
+
+    # =========================================================================
+    # STAGE D2: Imbalance Handling (class weights + resampling)
+    # =========================================================================
+    logger.info("\n[STAGE D2] Imbalance Handling")
+
+    imbalance_config = config.get('imbalance', {})
+    imbalance_handler = ImbalanceHandler(
+        strategy=imbalance_config.get('strategy', 'smote_tomek'),
+        weight_method=imbalance_config.get('class_weights', {}).get('method', 'balanced'),
+        smote_k_neighbors=imbalance_config.get('smote', {}).get('k_neighbors', 5),
+        gan_epochs=imbalance_config.get('gan', {}).get('epochs', 300),
+        random_state=get_config_value(config, 'reproducibility', 'global_seed', default=42)
+    )
+    imbalance_handler.fit(y_train)
+    class_weights = imbalance_handler.get_class_weights()
+    logger.info(f"Class weights: {class_weights}")
+
+    # Apply resampling to training data
+    X_train_balanced, y_train_balanced = imbalance_handler.resample(X_train, y_train)
+    logger.info(
+        f"Resampled train: {len(y_train)} -> {len(y_train_balanced)} samples | "
+        f"class dist: {dict(zip(*np.unique(y_train_balanced, return_counts=True)))}"
+    )
+
+    n_classes = len(np.unique(y_train_balanced))
+    n_features = X_train_balanced.shape[1]
+    random_state = get_config_value(config, 'reproducibility', 'global_seed', default=42)
 
     # =========================================================================
     # STAGE E: Setup for Optimization
     # =========================================================================
     logger.info("\n[STAGE E] Setup for Optimization")
 
-    # Setup imbalance handling
-    imbalance_config = config.get('imbalance', {})
-    imbalance_handler = ImbalanceHandler(
-        strategy=imbalance_config.get('strategy', 'class_weights'),
-        weight_method=imbalance_config.get('class_weights', {}).get('method', 'balanced')
-    )
-    imbalance_handler.fit(y_train)
-    class_weights = imbalance_handler.get_class_weights()
-
-    n_classes = len(np.unique(y_train))
-    n_features = X_train.shape[1]
-    random_state = get_config_value(config, 'reproducibility', 'global_seed', default=42)
-
-    # Setup metrics calculator
     ordinal_mapping = get_ordinal_mapping(label_encoder)
     idx_to_label = {v: k for k, v in label_encoder.items()}
     high_risk_idx = get_high_risk_indices(label_encoder)
 
-    # Setup objective calculator
-    obj_config = config.get('objectives', {})
     obj_weights = config.get('mcdm', {}).get('objective_weights', {})
 
     objective_calculator = ObjectiveCalculator(
@@ -514,13 +460,11 @@ def run_pipeline(config_path: str):
         }
     )
 
-    # Setup cross-validation splits
     cv_config = eval_config.get('inner_cv', {})
     n_splits = cv_config.get('n_splits', 5)
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    cv_splits = list(cv.split(X_train, y_train))
+    cv_splits = list(cv.split(X_train_balanced, y_train_balanced))
 
-    # Get optimization config
     opt_config = config.get('optimization', {})
     population_size = opt_config.get('population_size', 30)
     max_iterations = opt_config.get('max_iterations', 50)
@@ -531,11 +475,10 @@ def run_pipeline(config_path: str):
     logger.info("\n[STAGE F] PSO-GWO Multi-Objective Optimization")
 
     model_configs = config.get('models', {})
-    optimization_results = {}  # Store Pareto fronts per model
-    model_factories = {}  # Store factory functions
-    position_decoders = {}  # Store decoder functions
+    optimization_results = {}
+    model_factories = {}
+    position_decoders = {}
 
-    # Define models to optimize
     models_to_optimize = []
 
     if model_configs.get('catboost', {}).get('enabled', True):
@@ -553,11 +496,9 @@ def run_pipeline(config_path: str):
     else:
         logger.warning("PyTorch not available - skipping GRU and LSTM models")
 
-    # Run optimization for each model
     for model_name, model_key in models_to_optimize:
         logger.info(f"\n--- Optimizing {model_name} ---")
 
-        # Get search space
         if model_key == 'catboost':
             param_bounds, param_types = get_catboost_search_space(n_features)
             factory = create_catboost_factory(n_classes, class_weights, random_state)
@@ -579,15 +520,12 @@ def run_pipeline(config_path: str):
 
         model_factories[model_name] = factory
 
-        # Create objective function
         obj_fn, lower, upper, mapping = create_objective_function(
-            X_train, y_train, factory, objective_calculator,
+            X_train_balanced, y_train_balanced, factory, objective_calculator,
             cv_splits, param_bounds, param_types, n_features,
-            include_feature_selection=True,
             categorical_indices=cat_idx
         )
 
-        # Create position decoder for this model
         def make_decoder(param_types_local, mapping_local):
             def decoder(position):
                 return decode_position(position, mapping_local, param_types_local)
@@ -595,7 +533,6 @@ def run_pipeline(config_path: str):
 
         position_decoders[model_name] = make_decoder(param_types, mapping)
 
-        # Initialize PSO-GWO optimizer
         optimizer = PSOGWO(
             population_size=population_size,
             max_iterations=max_iterations,
@@ -609,8 +546,6 @@ def run_pipeline(config_path: str):
         )
 
         optimizer.initialize(lower, upper)
-
-        # Run optimization
         result = optimizer.optimize(obj_fn, verbose=True)
 
         optimization_results[model_name] = result
@@ -639,7 +574,6 @@ def run_pipeline(config_path: str):
         objective_weights=obj_weights_array
     )
 
-    # Level 1: Select best configuration per model
     best_configs = {}
     level1_rankings = {}
 
@@ -653,75 +587,51 @@ def run_pipeline(config_path: str):
         best_idx, vikor_result = model_selector.select_best_config(pareto_front, model_name)
         level1_rankings[model_name] = vikor_result
 
-        # Get best configuration
         best_position, best_cv_objectives = pareto_front[best_idx]
-        params, feature_mask = position_decoders[model_name](best_position)
+        params, _ = position_decoders[model_name](best_position)
 
         logger.info(f"\n{model_name} Best Configuration:")
         logger.info(f"  Parameters: {params}")
-        logger.info(f"  Selected features: {int(feature_mask.sum())}/{n_features}")
         logger.info(f"  CV Objectives: {best_cv_objectives}")
 
         best_configs[model_name] = ConfigurationResult(
             model_name=model_name,
             params=params,
-            feature_mask=feature_mask,
+            feature_mask=None,  # No feature selection
             cv_objectives=best_cv_objectives,
             cv_std=np.zeros_like(best_cv_objectives),
-            test_objectives=None  # Will be computed below
+            test_objectives=None
         )
 
     # Evaluate best configurations on test set
     logger.info("\n--- Evaluating Best Configurations on Test Set ---")
 
-    final_models = {}  # Store trained models for later use
+    final_models = {}
+    model_histories = {}  # Track training histories for animation
 
     for model_name, config_result in best_configs.items():
         params = config_result.params
-        feature_mask = config_result.feature_mask
 
-        # Apply feature mask
-        if feature_mask is not None and feature_mask.sum() > 0:
-            selected = feature_mask.astype(bool)
-            X_train_selected = X_train[:, selected]
-            X_test_selected = X_test[:, selected]
-            n_selected = int(feature_mask.sum())
-
-            # Adjust categorical indices
-            if model_name in ['GRU', 'LSTM'] and categorical_indices:
-                cat_idx_selected = []
-                original_idx = 0
-                for i, is_selected in enumerate(selected):
-                    if is_selected:
-                        if i in categorical_indices:
-                            cat_idx_selected.append(original_idx)
-                        original_idx += 1
-            else:
-                cat_idx_selected = None
-        else:
-            X_train_selected = X_train
-            X_test_selected = X_test
-            n_selected = n_features
-            cat_idx_selected = categorical_indices if model_name in ['GRU', 'LSTM'] else None
-
-        # Train model with best params
         model = model_factories[model_name](params)
 
         if hasattr(model, '_categorical_indices_hint'):
-            model.fit(X_train_selected, y_train, X_test_selected, y_test,
-                     categorical_features=cat_idx_selected)
+            model.fit(X_train_balanced, y_train_balanced, X_test, y_test,
+                      categorical_features=categorical_indices)
         else:
-            model.fit(X_train_selected, y_train, X_test_selected, y_test)
+            model.fit(X_train_balanced, y_train_balanced, X_test, y_test)
 
-        final_models[model_name] = (model, selected if feature_mask is not None else None)
+        final_models[model_name] = model
 
-        # Evaluate on test set
-        y_pred = model.predict(X_test_selected)
-        y_proba = model.predict_proba(X_test_selected)
+        # Capture training history if available
+        if hasattr(model, 'training_history'):
+            model_histories[model_name] = model.training_history
+
+        y_pred = model.predict(X_test)
+        y_proba = model.predict_proba(X_test)
 
         test_objectives = objective_calculator.compute_objectives(
             y_test, y_pred, y_proba,
-            n_features=n_selected,
+            n_features=n_features,
             model_complexity=model.get_model_complexity()
         )
 
@@ -730,7 +640,7 @@ def run_pipeline(config_path: str):
         logger.info(f"\n{model_name} Test Results:")
         logger.info(f"  Test Objectives: {test_objectives}")
 
-    # Level 2: Select best model among best-configured models
+    # Level 2: Select best model
     logger.info("\n--- Level 2: Cross-Model Selection ---")
 
     final_selection = model_selector.select_best_model(best_configs)
@@ -739,7 +649,6 @@ def run_pipeline(config_path: str):
     logger.info(f"\nBest Model: {final_selection.best_model_name}")
     logger.info(f"Model Rankings: {[list(best_configs.keys())[i] for i in final_selection.level2_ranking.rankings]}")
 
-    # Generate comparison table
     comparison_df = model_selector.generate_comparison_table(
         final_selection,
         objective_names=['ordinal_distance', 'severe_fnr', 'macro_f1_complement', 'complexity']
@@ -753,20 +662,11 @@ def run_pipeline(config_path: str):
 
     explain_config = config.get('explainability', {})
     best_model_name = final_selection.best_model_name
-    best_model, best_feature_mask = final_models[best_model_name]
-
-    # Apply feature mask for SHAP
-    if best_feature_mask is not None:
-        X_test_shap = X_test[:, best_feature_mask]
-        selected_feature_names = [f for i, f in enumerate(feature_names) if best_feature_mask[i]]
-    else:
-        X_test_shap = X_test
-        selected_feature_names = feature_names
+    best_model = final_models[best_model_name]
 
     shap_results = None
 
     if best_model_name in ['CatBoost', 'LightGBM']:
-        # TreeSHAP for tree models
         if explain_config.get('tree_shap', {}).get('enabled', True):
             try:
                 max_samples = explain_config.get('tree_shap', {}).get('max_samples', 1000)
@@ -775,8 +675,8 @@ def run_pipeline(config_path: str):
                     top_k_features=10
                 )
 
-                X_sample = X_test_shap[:min(max_samples, len(X_test_shap))]
-                shap_result_obj = shap_explainer.explain(best_model, X_sample, selected_feature_names)
+                X_sample = X_test[:min(max_samples, len(X_test))]
+                shap_result_obj = shap_explainer.explain(best_model, X_sample, feature_names)
 
                 importance_dict = dict(zip(
                     shap_result_obj.global_importance['feature'],
@@ -794,15 +694,14 @@ def run_pipeline(config_path: str):
                 logger.warning(f"TreeSHAP failed: {e}")
 
     elif best_model_name in ['GRU', 'LSTM']:
-        # Surrogate SHAP for deep models
         if explain_config.get('surrogate', {}).get('enabled', True):
             try:
                 surrogate_explainer = SurrogateExplainer(
                     surrogate_type=explain_config.get('surrogate', {}).get('surrogate_model', 'lightgbm')
                 )
 
-                X_sample = X_test_shap[:min(500, len(X_test_shap))]
-                surrogate_result = surrogate_explainer.explain(best_model, X_sample, selected_feature_names)
+                X_sample = X_test[:min(500, len(X_test))]
+                surrogate_result = surrogate_explainer.explain(best_model, X_sample, feature_names)
 
                 importance_dict = dict(zip(
                     surrogate_result.shap_result.global_importance['feature'],
@@ -828,9 +727,10 @@ def run_pipeline(config_path: str):
 
     scenario_config = config.get('scenarios', {})
     scenario_results = {}
+    scenario_result_objects = {}  # Full ScenarioResult objects for figure generation
 
     try:
-        feature_mapping = {name: i for i, name in enumerate(selected_feature_names)}
+        feature_mapping = {name: i for i, name in enumerate(feature_names)}
         scenario_engine = ScenarioEngine(
             feature_mapping=feature_mapping,
             high_risk_indices=high_risk_idx
@@ -840,7 +740,7 @@ def run_pipeline(config_path: str):
         if 'tds' in scenario_config and 'TDS' in feature_mapping:
             for pct in scenario_config['tds'].get('perturbations', [0.1, 0.2]):
                 result = scenario_engine.simulate_percentage_change(
-                    best_model, X_test_shap, 'TDS', pct, direction='increase'
+                    best_model, X_test, 'TDS', pct, direction='increase'
                 )
                 scenario_name = f"TDS_+{int(pct*100)}%"
                 scenario_results[scenario_name] = {
@@ -850,13 +750,14 @@ def run_pipeline(config_path: str):
                         np.mean(result.baseline_predictions != result.scenario_predictions) * 100
                     )
                 }
+                scenario_result_objects[scenario_name] = result
                 logger.info(f"{scenario_name}: Risk change = {scenario_results[scenario_name]['risk_change']:.4f}")
 
         # Run SAR scenarios
         if 'sar' in scenario_config and 'SAR' in feature_mapping:
             for pct in scenario_config['sar'].get('perturbations', [0.1]):
                 result = scenario_engine.simulate_percentage_change(
-                    best_model, X_test_shap, 'SAR', pct, direction='increase'
+                    best_model, X_test, 'SAR', pct, direction='increase'
                 )
                 scenario_name = f"SAR_+{int(pct*100)}%"
                 scenario_results[scenario_name] = {
@@ -866,10 +767,47 @@ def run_pipeline(config_path: str):
                         np.mean(result.baseline_predictions != result.scenario_predictions) * 100
                     )
                 }
+                scenario_result_objects[scenario_name] = result
                 logger.info(f"{scenario_name}: Risk change = {scenario_results[scenario_name]['risk_change']:.4f}")
 
+        # RSC threshold scenarios
+        if 'rsc' in scenario_config and 'RSC' in feature_mapping:
+            for threshold in scenario_config['rsc'].get('thresholds', [1.25, 2.5]):
+                result = scenario_engine.simulate_threshold_crossing(
+                    best_model, X_test, 'RSC', threshold, 'above'
+                )
+                scenario_name = f"RSC_above_{threshold}"
+                scenario_results[scenario_name] = {
+                    'risk_change': float(np.mean(result.high_risk_prob_change)),
+                    'scenario_name': result.scenario_name,
+                    'pct_class_changed': float(
+                        np.mean(result.baseline_predictions != result.scenario_predictions) * 100
+                    )
+                }
+                scenario_result_objects[scenario_name] = result
+                logger.info(f"{scenario_name}: Risk change = {scenario_results[scenario_name]['risk_change']:.4f}")
+
+        # If no scenario ran (features not available), run generic scenarios
+        if not scenario_results:
+            logger.info("Named features not found — running generic percentage scenarios on top features")
+            top_feature = feature_names[0] if feature_names else None
+            if top_feature and top_feature in feature_mapping:
+                for pct in [0.1, 0.2, 0.3]:
+                    result = scenario_engine.simulate_percentage_change(
+                        best_model, X_test, top_feature, pct, direction='increase'
+                    )
+                    scenario_name = f"{top_feature}_+{int(pct*100)}%"
+                    scenario_results[scenario_name] = {
+                        'risk_change': float(np.mean(result.high_risk_prob_change)),
+                        'scenario_name': result.scenario_name,
+                        'pct_class_changed': float(
+                            np.mean(result.baseline_predictions != result.scenario_predictions) * 100
+                        )
+                    }
+                    scenario_result_objects[scenario_name] = result
+
     except Exception as e:
-        logger.warning(f"Scenario simulation failed: {e}")
+        logger.warning(f"Scenario simulation failed: {e}", exc_info=True)
 
     # =========================================================================
     # STAGE J: Paper Outputs
@@ -879,7 +817,6 @@ def run_pipeline(config_path: str):
     paper_output_dir = Path(get_config_value(config, 'output', 'paper_outputs', default='outputs/paper_outputs'))
     paper_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prepare results DataFrame
     results = []
     metrics_calc = MetricsCalculator(
         label_to_ordinal=ordinal_mapping,
@@ -887,10 +824,9 @@ def run_pipeline(config_path: str):
         high_risk_indices=high_risk_idx
     )
 
-    for model_name, (model, feature_mask) in final_models.items():
-        X_eval = X_test[:, feature_mask] if feature_mask is not None else X_test
-        y_pred = model.predict(X_eval)
-        y_proba = model.predict_proba(X_eval)
+    for model_name, model in final_models.items():
+        y_pred = model.predict(X_test)
+        y_proba = model.predict_proba(X_test)
 
         metrics = metrics_calc.compute_all(y_test, y_pred, y_proba)
         metrics['Model'] = model_name
@@ -903,7 +839,6 @@ def run_pipeline(config_path: str):
 
     results_df = pd.DataFrame(results).sort_values('Rank')
 
-    # Generate figures
     fig_gen = FigureGenerator(output_dir=paper_output_dir / 'figures')
 
     # F1: Flowchart
@@ -915,7 +850,7 @@ def run_pipeline(config_path: str):
     # F3: Temporal schematic
     fig_gen.f3_temporal_forecasting_schematic()
 
-    # F4: Model comparison (all 4 models) — show decision-relevant metrics + VIKOR winner
+    # F4: Model comparison
     fig_gen.f4_model_comparison(
         results_df,
         metrics=['macro_f1', 'severe_fnr', 'ordinal_distance_mean'],
@@ -934,10 +869,10 @@ def run_pipeline(config_path: str):
     except Exception as e:
         logger.warning(f"VIKOR ranking figure failed: {e}")
 
-    # F7: SHAP summary + extended SHAP figures (F7b beeswarm, F7d dependence)
+    # F7: SHAP summary
     if shap_results:
         try:
-            fig_gen.f7_shap_summary(shap_results['importance'], selected_feature_names)
+            fig_gen.f7_shap_summary(shap_results['importance'], feature_names)
         except Exception as e:
             logger.warning(f"SHAP summary figure failed: {e}")
 
@@ -946,17 +881,17 @@ def run_pipeline(config_path: str):
                 class_names = [idx_to_label.get(i, str(i)) for i in sorted(idx_to_label.keys())]
                 fig_gen.generate_all_shap_figures(
                     shap_results['shap_result'],
-                    X_test_shap,
+                    X_test,
                     high_risk_importance=None,
                     class_names=class_names,
-                    top_k=min(15, len(selected_feature_names))
+                    top_k=min(15, len(feature_names))
                 )
             except Exception as e:
                 logger.warning(f"Extended SHAP figures failed: {e}")
 
     # F4b: Confusion matrix for best model
     try:
-        y_pred_best = best_model.predict(X_test_shap)
+        y_pred_best = best_model.predict(X_test)
         class_names_list = [idx_to_label.get(i, str(i)) for i in sorted(idx_to_label.keys())]
         fig_gen.f4b_confusion_matrix(y_test, y_pred_best, class_names_list, model_name=best_model_name)
     except Exception as e:
@@ -964,7 +899,8 @@ def run_pipeline(config_path: str):
 
     # F4c: Per-class metrics for best model
     try:
-        metrics_best = metrics_calc.compute_all(y_test, y_pred_best, best_model.predict_proba(X_test_shap))
+        y_proba_best = best_model.predict_proba(X_test)
+        metrics_best = metrics_calc.compute_all(y_test, y_pred_best, y_proba_best)
         per_class = metrics_calc.get_per_class_metrics(y_test, y_pred_best)
         if per_class:
             labeled_per_class = {idx_to_label.get(k, str(k)): v for k, v in per_class.items()}
@@ -978,19 +914,43 @@ def run_pipeline(config_path: str):
     except Exception as e:
         logger.warning(f"Severity comparison figure failed: {e}")
 
-    # ROC curves for best model
+    # ROC curves
     try:
-        y_proba_best = best_model.predict_proba(X_test_shap)
+        y_proba_best = best_model.predict_proba(X_test)
         class_names_roc = [idx_to_label.get(i, str(i)) for i in sorted(idx_to_label.keys())]
         fig_gen.f_roc_curves(y_test, y_proba_best, class_names_roc, model_name=best_model_name)
     except Exception as e:
         logger.warning(f"ROC curves figure failed: {e}")
 
-    # Precision-Recall curves for best model
+    # Precision-Recall curves
     try:
         fig_gen.f_pr_curves(y_test, y_proba_best, class_names_roc, model_name=best_model_name)
     except Exception as e:
         logger.warning(f"PR curves figure failed: {e}")
+
+    # F8: Scenario simulation figures
+    if scenario_result_objects:
+        try:
+            class_names_scen = [idx_to_label.get(i, str(i)) for i in sorted(idx_to_label.keys())]
+            fig_gen.f8_scenario_simulation(
+                scenario_result_objects,
+                class_names=class_names_scen,
+                idx_to_label=idx_to_label,
+                high_risk_indices=high_risk_idx
+            )
+            logger.info("Scenario simulation figures generated")
+        except Exception as e:
+            logger.warning(f"Scenario figure failed: {e}", exc_info=True)
+
+    # F9: Imbalance handling figure (before/after class distribution)
+    try:
+        fig_gen.f9_imbalance_handling(
+            y_train, y_train_balanced,
+            idx_to_label=idx_to_label,
+            strategy=imbalance_handler.strategy
+        )
+    except Exception as e:
+        logger.warning(f"Imbalance figure failed: {e}")
 
     # Learning curves for deep models
     if best_model_name in ['LSTM', 'GRU'] and hasattr(best_model, 'training_history'):
@@ -999,44 +959,47 @@ def run_pipeline(config_path: str):
         except Exception as e:
             logger.warning(f"Learning curves figure failed: {e}")
 
+    # Training animations for all models
+    try:
+        from src.reporting.animation import TrainingAnimator
+        animator = TrainingAnimator(output_dir=paper_output_dir / 'figures')
+        for m_name, m_history in model_histories.items():
+            animator.animate_training(m_history, model_name=m_name)
+        # Also animate a summary across all models with available histories
+        if model_histories:
+            animator.animate_multi_model_comparison(model_histories, metric='val_loss')
+    except Exception as e:
+        logger.warning(f"Training animation failed: {e}", exc_info=True)
+
     # Generate tables
     table_gen = TableGenerator(output_dir=paper_output_dir / 'tables')
 
-    # T1: Dataset overview
     table_gen.t1_dataset_overview(cleaned_data)
-
-    # T2: Label mapping
     table_gen.t2_label_mapping(label_encoder, HIGH_RISK_CLASSES)
 
-    # T3: Hyperparameter bounds
     try:
         table_gen.t3_hyperparameter_bounds(config.get('models', {}))
     except Exception as e:
         logger.warning(f"Hyperparameter table failed: {e}")
 
-    # T4: Best configurations
     try:
         table_gen.t4_best_configurations(best_configs)
     except Exception as e:
         logger.warning(f"Best config table failed: {e}")
 
-    # T5: Test performance
     results_df.to_csv(paper_output_dir / 'tables' / 'model_results.csv', index=False)
 
-    # T6: SHAP drivers
     if shap_results:
         pd.DataFrame(list(shap_results['importance'].items()),
-                    columns=['Feature', 'Importance']).to_csv(
+                     columns=['Feature', 'Importance']).to_csv(
             paper_output_dir / 'tables' / 'shap_importance.csv', index=False
         )
 
-    # T7: Scenario outcomes
     if scenario_results:
         pd.DataFrame([
             {'Scenario': k, **v} for k, v in scenario_results.items()
         ]).to_csv(paper_output_dir / 'tables' / 'scenario_results.csv', index=False)
 
-    # Save comparison table
     comparison_df.to_csv(paper_output_dir / 'tables' / 'model_comparison_vikor.csv', index=False)
 
     # Generate insights
@@ -1050,7 +1013,7 @@ def run_pipeline(config_path: str):
         'selection_method': 'VIKOR MCDM'
     })
 
-    top_features = list(shap_results['importance'].keys())[:5] if shap_results else selected_feature_names[:5]
+    top_features = list(shap_results['importance'].keys())[:5] if shap_results else feature_names[:5]
     recommendations = insights_gen.generate_recommendations(
         shap_top_features=top_features,
         vulnerable_districts=[],
@@ -1099,9 +1062,9 @@ def main():
         print("\nModel Comparison:")
         print(results.to_string())
     except Exception as e:
-        logger.exception(f"Pipeline failed: {e}")
+        logger.error(f"Pipeline failed: {e}", exc_info=True)
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
