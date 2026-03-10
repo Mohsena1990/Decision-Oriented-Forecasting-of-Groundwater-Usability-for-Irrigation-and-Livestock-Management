@@ -121,10 +121,21 @@ class LSTMForecaster(BaseForecaster):
             raise ImportError("PyTorch not installed. Install with: pip install torch")
 
         super().__init__(config)
-        self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self._device = self._get_device()
         self._categorical_cardinalities: Dict[int, int] = {}
         self._n_numeric: int = 0
         self._network: Optional[nn.Module] = None
+
+    @staticmethod
+    def _get_device() -> 'torch.device':
+        """Return CUDA if available and functional, else CPU."""
+        if torch.cuda.is_available():
+            try:
+                torch.zeros(1).cuda()
+                return torch.device('cuda')
+            except Exception:
+                logger.warning("CUDA reported as available but failed probe — falling back to CPU")
+        return torch.device('cpu')
 
     def fit(
         self,
@@ -163,7 +174,7 @@ class LSTMForecaster(BaseForecaster):
         X_categorical = X[:, categorical_features].astype(np.int64) if categorical_features else np.zeros((len(X), 0), dtype=np.int64)
 
         # Create network
-        self._network = LSTMNetwork(
+        net = LSTMNetwork(
             n_numeric=self._n_numeric,
             n_classes=self._n_classes,
             categorical_cardinalities=self._categorical_cardinalities,
@@ -171,7 +182,13 @@ class LSTMForecaster(BaseForecaster):
             num_layers=self.config.params.get('num_layers', 1),
             dropout=self.config.params.get('dropout', 0.2),
             embedding_dim=self.config.params.get('embedding_dim', 16)
-        ).to(self._device)
+        )
+        try:
+            self._network = net.to(self._device)
+        except Exception:
+            logger.warning("Failed to move LSTM network to %s — falling back to CPU", self._device)
+            self._device = torch.device('cpu')
+            self._network = net.to(self._device)
 
         # Training setup
         criterion = nn.CrossEntropyLoss(

@@ -91,7 +91,7 @@ data_quality:
     drop_empty_columns: true
     resolve_label_typos: true
     handle_rare_classes: "merge"  # "merge" to Other or "drop"
-    rare_class_threshold: 10  # Minimum samples per class (combined across all years)
+    rare_class_threshold: 20  # Minimum samples per class (combined across all years)
 
 # -----------------------------------------------------------------------------
 # LABEL CONFIGURATION
@@ -113,7 +113,7 @@ labels:
   s_order: [1, 2, 3, 4]  # S1=excellent to S4=very high sodium
 
   # High-risk class definition (for severity metrics).
-  # Note: C4S3, C4S4, C3S3, C3S4 are merged into "Other" when rare_class_threshold>=10,
+  # Note: C4S3, C4S4, C3S3, C3S4 are merged into "Other" when rare_class_threshold>=20,
   # so only C4S1, C4S2 (and "Other" as partial high-risk) are kept here.
   high_risk_classes:
     - "C4S1"
