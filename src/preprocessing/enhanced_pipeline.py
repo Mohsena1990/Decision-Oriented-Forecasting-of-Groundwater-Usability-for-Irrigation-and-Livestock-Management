@@ -46,8 +46,8 @@ HIGH_OUTLIER_FEATURES = ['CO3', 'SO4', 'K', 'NO3', 'SAR', 'Na']
 # Most discriminative features (ANOVA F > 100)
 TOP_DISCRIMINATIVE_FEATURES = ['EC', 'Na', 'SAR', 'Cl', 'Mg', 'HCO3', 'Ca', 'NO3']
 
-# High-risk classes for special weighting
-HIGH_RISK_CLASSES = ['C4S1', 'C4S2', 'C4S3', 'C4S4', 'C3S3', 'C3S4']
+# High-risk tiers (T3_Restricted + T4_Unsafe) — imported from canonical definition
+from src.objectives.definitions import HIGH_RISK_CLASSES  # noqa: E402
 
 
 @dataclass
@@ -70,8 +70,9 @@ class EnhancedPreprocessingConfig:
     winsorize_limits: Tuple[float, float] = (0.02, 0.98)  # Stronger winsorization
 
     # Feature engineering
-    add_current_class_feature: bool = True  # Use current year's class as feature
-    add_interaction_features: bool = True   # Add key interactions
+    add_current_class_feature: bool = True   # Use current year's class as feature
+    add_interaction_features: bool = True    # Add key interactions
+    add_location_aggregates: bool = True     # District/mandal risk-level priors
 
     # Class weighting
     class_weight_strategy: str = 'custom_high_risk'  # 'balanced', 'sqrt', 'custom_high_risk'
@@ -110,6 +111,11 @@ class EnhancedPreprocessingPipeline:
     _final_feature_names: List[str] = field(default_factory=list, init=False)
     _class_weights: Optional[Dict[int, float]] = field(default=None, init=False)
     _is_fitted: bool = field(default=False, init=False)
+    # Location-level risk priors (fitted on training data, applied to all splits)
+    _district_mean_class: Dict[str, float] = field(default_factory=dict, init=False)
+    _district_high_risk_rate: Dict[str, float] = field(default_factory=dict, init=False)
+    _mandal_mean_class: Dict[str, float] = field(default_factory=dict, init=False)
+    _global_mean_class: float = field(default=0.0, init=False)
 
     def __post_init__(self):
         """Apply feature removal based on config."""
@@ -162,6 +168,12 @@ class EnhancedPreprocessingPipeline:
             self._compute_class_weights(df[self.target_column])
         elif y is not None:
             self._compute_class_weights(y)
+
+        # 7. Fit location-level risk aggregates from training data
+        if self.config.add_location_aggregates:
+            target_for_agg = df[self.target_column] if self.target_column in df.columns else y
+            if target_for_agg is not None:
+                self._fit_location_aggregates(df, target_for_agg)
 
         self._is_fitted = True
         logger.info("Enhanced preprocessing pipeline fitted successfully")
@@ -218,6 +230,13 @@ class EnhancedPreprocessingPipeline:
             if X_current is not None:
                 feature_arrays.append(X_current)
                 feature_names.extend(current_names)
+
+        # 4b. Add location-level risk aggregate features
+        if self.config.add_location_aggregates:
+            X_agg, agg_names = self._transform_location_aggregates(df)
+            if X_agg is not None:
+                feature_arrays.append(X_agg)
+                feature_names.extend(agg_names)
 
         # 5. Add interaction features
         if include_interactions and X_numeric is not None:
@@ -371,12 +390,17 @@ class EnhancedPreprocessingPipeline:
             logger.debug(f"Fitted encoder for {col}: {len(values)} unique values")
 
     def _fit_label_encoder(self, y: pd.Series):
-        """Fit label encoder for target with ordinal ordering."""
+        """Fit label encoder for target — handles tier names and raw C#S# labels."""
         unique_labels = y.dropna().unique()
 
-        # Sort by C and S components for ordinal ordering
+        # Tier order for the 3-tier semantic system (T1 < T2 < T3)
+        _tier_order = {'T1_Safe': 0, 'T2_Marginal': 1, 'T3_Restricted': 2, 'T4_Unsafe': 3}
+
         def sort_key(label):
-            match = re.match(r'C(\d)S(\d)', str(label))
+            s = str(label)
+            if s in _tier_order:
+                return (_tier_order[s], 0)
+            match = re.match(r'C(\d)S(\d)', s)
             if match:
                 return (int(match.group(1)), int(match.group(2)))
             return (99, 99)
@@ -556,6 +580,75 @@ class EnhancedPreprocessingPipeline:
             return X_interact, interaction_names
 
         return None, []
+
+    def _fit_location_aggregates(self, df: pd.DataFrame, target: pd.Series):
+        """
+        Compute district/mandal-level risk priors from training data.
+
+        For each district and mandal, record:
+          - mean encoded class (proxy for typical risk level)
+          - proportion of high-risk samples (T3_Restricted = encoded index 2)
+
+        These provide strong geographic priors for temporal forecasting:
+        locations in historically high-risk districts are more likely to
+        remain high-risk in the next year.
+        """
+        if self._label_encoder is None:
+            return
+
+        encoded_target = target.map(self._label_encoder)
+        self._global_mean_class = float(encoded_target.mean()) if len(encoded_target) > 0 else 0.0
+        high_risk_idx = max(self._label_encoder.values())  # T3_Restricted = highest index
+
+        tmp = df.copy()
+        tmp['_enc_target'] = encoded_target.values
+
+        if 'district' in df.columns:
+            district_stats = tmp.groupby('district')['_enc_target'].agg(['mean', lambda s: (s == high_risk_idx).mean()])
+            district_stats.columns = ['mean_class', 'high_risk_rate']
+            self._district_mean_class = district_stats['mean_class'].to_dict()
+            self._district_high_risk_rate = district_stats['high_risk_rate'].to_dict()
+            logger.info(f"Fitted district-level aggregates for {len(self._district_mean_class)} districts")
+
+        if 'mandal' in df.columns:
+            mandal_stats = tmp.groupby('mandal')['_enc_target'].mean()
+            self._mandal_mean_class = mandal_stats.to_dict()
+            logger.info(f"Fitted mandal-level aggregates for {len(self._mandal_mean_class)} mandals")
+
+    def _transform_location_aggregates(
+        self,
+        df: pd.DataFrame
+    ) -> Tuple[Optional[np.ndarray], List[str]]:
+        """
+        Map each row to its district/mandal risk priors.
+
+        Unseen locations fall back to the global training mean.
+        """
+        n = len(df)
+        features = []
+        names = []
+
+        if self._district_mean_class:
+            dist_mean = df.get('district', pd.Series([''] * n)).map(
+                lambda d: self._district_mean_class.get(str(d), self._global_mean_class)
+            ).values.astype(np.float32)
+            dist_hr = df.get('district', pd.Series([''] * n)).map(
+                lambda d: self._district_high_risk_rate.get(str(d), 0.0)
+            ).values.astype(np.float32)
+            features.extend([dist_mean.reshape(-1, 1), dist_hr.reshape(-1, 1)])
+            names.extend(['district_mean_class', 'district_high_risk_rate'])
+
+        if self._mandal_mean_class:
+            mandal_mean = df.get('mandal', pd.Series([''] * n)).map(
+                lambda m: self._mandal_mean_class.get(str(m), self._global_mean_class)
+            ).values.astype(np.float32)
+            features.append(mandal_mean.reshape(-1, 1))
+            names.append('mandal_mean_class')
+
+        if not features:
+            return None, []
+
+        return np.concatenate(features, axis=1).astype(np.float32), names
 
     def get_class_weights(self) -> Optional[Dict[int, float]]:
         """Get computed class weights."""

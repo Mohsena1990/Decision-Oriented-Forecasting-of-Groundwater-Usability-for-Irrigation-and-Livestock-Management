@@ -77,22 +77,27 @@ logger = logging.getLogger(__name__)
 # MODEL FACTORIES
 # =============================================================================
 
-def create_catboost_factory(n_classes: int, class_weights: Dict[int, float], random_state: int):
+def create_catboost_factory(n_classes: int, class_weights: Dict[int, float], random_state: int,
+                            categorical_indices: Optional[List[int]] = None):
     """Factory function for CatBoost models."""
     def factory(params: Dict[str, Any]) -> CatBoostForecaster:
         config = ForecasterConfig(
             params={
-                'iterations': int(params.get('iterations', 500)),
+                'iterations': int(params.get('iterations', 5000)),
                 'depth': int(params.get('depth', 6)),
-                'learning_rate': params.get('learning_rate', 0.1),
+                'learning_rate': params.get('learning_rate', 0.003),
                 'l2_leaf_reg': params.get('l2_leaf_reg', 3),
-                'early_stopping_rounds': 50
+                'min_data_in_leaf': int(params.get('min_data_in_leaf', 20)),
+                'early_stopping_rounds': 100
             },
             n_classes=n_classes,
             class_weights=class_weights,
             random_state=random_state
         )
-        return CatBoostForecaster(config=config)
+        model = CatBoostForecaster(config=config)
+        # Mark for categorical feature passing (same pattern as GRU/LSTM)
+        model._categorical_indices_hint = categorical_indices or []
+        return model
     return factory
 
 
@@ -101,12 +106,14 @@ def create_lightgbm_factory(n_classes: int, class_weights: Dict[int, float], ran
     def factory(params: Dict[str, Any]) -> LightGBMForecaster:
         config = ForecasterConfig(
             params={
-                'n_estimators': int(params.get('n_estimators', 500)),
+                'n_estimators': int(params.get('n_estimators', 2000)),
                 'max_depth': int(params.get('max_depth', 6)),
-                'learning_rate': params.get('learning_rate', 0.1),
+                'learning_rate': params.get('learning_rate', 0.01),
                 'num_leaves': int(params.get('num_leaves', 31)),
                 'min_child_samples': int(params.get('min_child_samples', 20)),
-                'early_stopping_rounds': 50
+                'reg_alpha': params.get('reg_alpha', 0.1),
+                'reg_lambda': params.get('reg_lambda', 0.1),
+                'early_stopping_rounds': 100
             },
             n_classes=n_classes,
             class_weights=class_weights,
@@ -169,37 +176,43 @@ def create_lstm_factory(n_classes: int, class_weights: Dict[int, float], random_
 # =============================================================================
 
 def get_catboost_search_space(n_features: int):
-    """Get search space for CatBoost."""
+    """Get search space for CatBoost (Sample-1 inspired: high iters, low LR)."""
     param_bounds = {
-        'iterations': (100, 1000),
-        'depth': (4, 10),
-        'learning_rate': (-2, -0.5),  # log scale: 10^-2 to 10^-0.5
-        'l2_leaf_reg': (1, 10)
+        'iterations': (1000, 14000),           # up to 14k like Sample 1
+        'depth': (4, 8),
+        'learning_rate': (-3.5, -0.5),         # log scale: 0.0003 to 0.316
+        'l2_leaf_reg': (1, 10),
+        'min_data_in_leaf': (10, 30),          # prevents overfitting on small data
     }
     param_types = {
         'iterations': 'int',
         'depth': 'int',
         'learning_rate': 'log',
-        'l2_leaf_reg': 'float'
+        'l2_leaf_reg': 'float',
+        'min_data_in_leaf': 'int',
     }
     return param_bounds, param_types
 
 
 def get_lightgbm_search_space(n_features: int):
-    """Get search space for LightGBM."""
+    """Get search space for LightGBM (extended for small-dataset slow learning)."""
     param_bounds = {
-        'n_estimators': (100, 1000),
+        'n_estimators': (500, 5000),           # higher ceiling for slow LR
         'max_depth': (4, 10),
-        'learning_rate': (-2, -0.5),  # log scale
+        'learning_rate': (-3.0, -0.5),         # log scale: 0.001 to 0.316
         'num_leaves': (15, 127),
-        'min_child_samples': (5, 50)
+        'min_child_samples': (5, 50),
+        'reg_alpha': (0.0, 1.0),
+        'reg_lambda': (0.0, 1.0),
     }
     param_types = {
         'n_estimators': 'int',
         'max_depth': 'int',
         'learning_rate': 'log',
         'num_leaves': 'int',
-        'min_child_samples': 'int'
+        'min_child_samples': 'int',
+        'reg_alpha': 'float',
+        'reg_lambda': 'float',
     }
     return param_bounds, param_types
 
@@ -365,9 +378,7 @@ def run_pipeline(config_path: str):
 
     label_config = config.get('labels', {})
     cleaner = DataCleaner(
-        label_typo_mapping=label_config.get('typo_mapping', {}),
-        rare_class_handling=dq_config.get('cleaning', {}).get('handle_rare_classes', 'merge'),
-        rare_class_threshold=dq_config.get('cleaning', {}).get('rare_class_threshold', 5)
+        label_typo_mapping=label_config.get('typo_mapping', {})
     )
 
     cleaned_data = cleaner.clean_all(data, fit_year=2018)
@@ -501,12 +512,13 @@ def run_pipeline(config_path: str):
 
         if model_key == 'catboost':
             param_bounds, param_types = get_catboost_search_space(n_features)
-            factory = create_catboost_factory(n_classes, class_weights, random_state)
-            cat_idx = None
+            factory = create_catboost_factory(n_classes, class_weights, random_state,
+                                              categorical_indices=categorical_indices)
+            cat_idx = categorical_indices  # CatBoost now uses native categorical handling
         elif model_key == 'lightgbm':
             param_bounds, param_types = get_lightgbm_search_space(n_features)
             factory = create_lightgbm_factory(n_classes, class_weights, random_state)
-            cat_idx = None
+            cat_idx = categorical_indices
         elif model_key == 'gru':
             param_bounds, param_types = get_gru_search_space(n_features)
             factory = create_gru_factory(n_classes, class_weights, random_state, categorical_indices)

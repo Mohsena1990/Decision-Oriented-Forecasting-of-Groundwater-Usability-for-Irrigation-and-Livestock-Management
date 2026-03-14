@@ -1,7 +1,5 @@
 Label,Index,C_Component,S_Component,High_Risk
-C2S1,0,2.0,1.0,No
-C3S1,1,3.0,1.0,No
-C3S2,2,3.0,2.0,No
-C4S1,3,4.0,1.0,Yes
-C4S2,4,4.0,2.0,Yes
-Other,5,,,Yes
+T1_Safe,0,,,No
+T2_Marginal,1,,,No
+T3_Restricted,2,,,Yes
+T4_Unsafe,3,,,Yes

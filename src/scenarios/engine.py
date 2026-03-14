@@ -4,11 +4,24 @@ Scenario Simulation Engine
 
 Simulates "what-if" scenarios by perturbing key hydrochemical
 features and measuring impacts on groundwater quality predictions.
+
+Scaling note
+------------
+Tree-based models (CatBoost, LightGBM) receive raw, unscaled features.
+Deep models (GRU, LSTM) receive StandardScaler-normalised features.
+
+When an sklearn-compatible ``scaler`` is provided to ScenarioEngine,
+percentage perturbations are applied correctly in *raw-feature space*:
+the column is inverse-transformed, perturbed, then re-transformed.
+This ensures that "+10% TDS" always means a true 10% increase in the
+original mg/L values, regardless of whether the model sees scaled data.
+
+Without a scaler (tree models), the raw values are perturbed directly.
 """
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -35,13 +48,72 @@ class ScenarioEngine:
     Simulate hydrochemical scenarios and measure prediction impacts.
 
     Supports:
-    - Percentage perturbations (e.g., +10% TDS)
+    - Percentage perturbations (e.g., +10% TDS) — always in raw-feature space
     - Threshold-based scenarios (e.g., RSC crossing thresholds)
     - Combined multi-parameter scenarios
+
+    Attributes:
+        feature_mapping: Feature name -> column index in X
+        high_risk_indices: Encoded class indices that are high-risk
+        scaler: Optional sklearn scaler used when building X.  When
+            provided, perturbations are computed in raw space and then
+            re-scaled, producing physically correct "what-if" values.
+        scaler_feature_names: Ordered list of feature names the scaler
+            was fitted on (needed to locate each feature's column inside
+            the scaler's internal arrays).
     """
 
-    feature_mapping: Dict[str, int] = field(default_factory=dict)  # Feature name -> column index
+    feature_mapping: Dict[str, int] = field(default_factory=dict)
     high_risk_indices: List[int] = field(default_factory=list)
+    scaler: Optional[Any] = field(default=None)
+    scaler_feature_names: List[str] = field(default_factory=list)
+
+    # ------------------------------------------------------------------
+    # Internal helpers for scale-aware perturbation
+    # ------------------------------------------------------------------
+
+    def _perturb_column_raw(
+        self,
+        X: np.ndarray,
+        col_idx: int,
+        feature_name: str,
+        multiplier: float
+    ) -> np.ndarray:
+        """
+        Return a copy of X with one column perturbed by *multiplier* in
+        raw-feature space.
+
+        If a scaler is attached and the feature is in its vocabulary the
+        perturbation is:
+            1. Extract the scaled column.
+            2. Inverse-transform to raw values using the feature's
+               per-column mean and std stored in the scaler.
+            3. Apply the multiplier to the raw values.
+            4. Re-scale the result back.
+
+        For unscaled data (no scaler, or feature not in scaler), the
+        column is multiplied directly — which is already correct.
+        """
+        X_out = X.copy()
+
+        if self.scaler is not None and feature_name in self.scaler_feature_names:
+            scaler_col = self.scaler_feature_names.index(feature_name)
+            mean = self.scaler.mean_[scaler_col]
+            std = self.scaler.scale_[scaler_col]  # StandardScaler stores std in .scale_
+
+            # x_raw = x_scaled * std + mean
+            raw_vals = X_out[:, col_idx] * std + mean
+
+            # Perturb in raw space
+            raw_vals_new = raw_vals * multiplier
+
+            # Re-scale: x_scaled_new = (x_raw_new - mean) / std
+            X_out[:, col_idx] = (raw_vals_new - mean) / std
+        else:
+            # Raw features (tree models) — direct multiplication is correct
+            X_out[:, col_idx] = X_out[:, col_idx] * multiplier
+
+        return X_out
 
     def simulate_percentage_change(
         self,
@@ -52,13 +124,13 @@ class ScenarioEngine:
         direction: str = "increase"
     ) -> ScenarioResult:
         """
-        Simulate percentage change in a feature.
+        Simulate percentage change in a feature (perturbation in raw space).
 
         Args:
             model: Fitted model
-            X: Original feature data
+            X: Feature data (may be scaled or raw; see ``scaler`` attribute)
             feature_name: Name of feature to perturb
-            percentage: Percentage change (e.g., 0.1 for 10%)
+            percentage: Fractional change magnitude (e.g., 0.1 for 10%)
             direction: "increase" or "decrease"
 
         Returns:
@@ -68,15 +140,13 @@ class ScenarioEngine:
             raise ValueError(f"Feature {feature_name} not in mapping")
 
         col_idx = self.feature_mapping[feature_name]
+        multiplier = 1.0 + percentage if direction == "increase" else 1.0 - percentage
 
-        # Create perturbed data
-        X_perturbed = X.copy()
-        multiplier = 1 + percentage if direction == "increase" else 1 - percentage
-        X_perturbed[:, col_idx] = X_perturbed[:, col_idx] * multiplier
+        X_perturbed = self._perturb_column_raw(X, col_idx, feature_name, multiplier)
 
         return self._evaluate_scenario(
             model, X, X_perturbed,
-            f"{feature_name}_{direction}_{int(percentage*100)}pct"
+            f"{feature_name}_{direction}_{int(percentage * 100)}pct"
         )
 
     def simulate_threshold_crossing(
@@ -88,13 +158,17 @@ class ScenarioEngine:
         cross_direction: str = "above"
     ) -> ScenarioResult:
         """
-        Simulate feature values crossing a threshold.
+        Simulate feature values crossing a threshold (in raw space).
+
+        The threshold is expressed in raw (physical) units.  When a
+        scaler is attached, the threshold is converted to scaled space
+        before applying the mask.
 
         Args:
             model: Fitted model
-            X: Original feature data
+            X: Feature data (may be scaled or raw)
             feature_name: Name of feature
-            threshold: Threshold value
+            threshold: Threshold in raw physical units (e.g. mg/L for TDS)
             cross_direction: "above" or "below"
 
         Returns:
@@ -104,18 +178,27 @@ class ScenarioEngine:
             raise ValueError(f"Feature {feature_name} not in mapping")
 
         col_idx = self.feature_mapping[feature_name]
-
-        # Create perturbed data
         X_perturbed = X.copy()
 
-        if cross_direction == "above":
-            # Set values below threshold to just above
-            mask = X_perturbed[:, col_idx] < threshold
-            X_perturbed[mask, col_idx] = threshold * 1.01
+        # Convert threshold to the same space as X
+        if self.scaler is not None and feature_name in self.scaler_feature_names:
+            scaler_col = self.scaler_feature_names.index(feature_name)
+            mean = self.scaler.mean_[scaler_col]
+            std = self.scaler.scale_[scaler_col]
+            threshold_scaled = (threshold - mean) / std
+            nudge_above = threshold_scaled + (0.01 * std)  # small absolute nudge
+            nudge_below = threshold_scaled - (0.01 * std)
         else:
-            # Set values above threshold to just below
-            mask = X_perturbed[:, col_idx] > threshold
-            X_perturbed[mask, col_idx] = threshold * 0.99
+            threshold_scaled = threshold
+            nudge_above = threshold * 1.01
+            nudge_below = threshold * 0.99
+
+        if cross_direction == "above":
+            mask = X_perturbed[:, col_idx] < threshold_scaled
+            X_perturbed[mask, col_idx] = nudge_above
+        else:
+            mask = X_perturbed[:, col_idx] > threshold_scaled
+            X_perturbed[mask, col_idx] = nudge_below
 
         return self._evaluate_scenario(
             model, X, X_perturbed,
@@ -149,8 +232,8 @@ class ScenarioEngine:
                 continue
 
             col_idx = self.feature_mapping[feature_name]
-            multiplier = 1 + percentage if direction == "increase" else 1 - percentage
-            X_perturbed[:, col_idx] = X_perturbed[:, col_idx] * multiplier
+            multiplier = 1.0 + percentage if direction == "increase" else 1.0 - percentage
+            X_perturbed = self._perturb_column_raw(X_perturbed, col_idx, feature_name, multiplier)
 
         return self._evaluate_scenario(model, X, X_perturbed, scenario_name)
 

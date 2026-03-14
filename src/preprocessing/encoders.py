@@ -126,11 +126,9 @@ class LabelParser:
             True if high risk
         """
         if high_risk_classes is None:
-            # Default: C4* and C3S3, C3S4
-            high_risk_classes = [
-                'C4S1', 'C4S2', 'C4S3', 'C4S4',
-                'C3S3', 'C3S4'
-            ]
+            # Default: T3_Restricted and T4_Unsafe tiers
+            from src.objectives.definitions import HIGH_RISK_CLASSES
+            high_risk_classes = HIGH_RISK_CLASSES
 
         label = str(label).strip().upper()
         return label in high_risk_classes

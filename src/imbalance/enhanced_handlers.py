@@ -21,8 +21,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# High-risk classes that need special attention
-HIGH_RISK_CLASSES = ['C4S1', 'C4S2', 'C4S3', 'C4S4', 'C3S3', 'C3S4']
+# High-risk tiers (T3_Restricted + T4_Unsafe) — imported from canonical definition
+from src.objectives.definitions import HIGH_RISK_CLASSES  # noqa: E402
 
 
 # =============================================================================

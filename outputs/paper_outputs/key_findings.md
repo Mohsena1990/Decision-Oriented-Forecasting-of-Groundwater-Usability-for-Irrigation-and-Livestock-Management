@@ -2,10 +2,10 @@
 
 ## Model Performance
 
-- **Best Model**: LSTM
+- **Best Model**: LightGBM
 
-- **Macro F1**: 0.226
+- **Macro F1**: 0.201
 
-- **Severe FNR**: 0.388
+- **Severe FNR**: 0.913
 
 - **Ordinal Distance**: N/A

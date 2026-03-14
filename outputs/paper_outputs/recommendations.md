@@ -4,15 +4,15 @@
 
 Based on the analysis, the following parameters should be prioritized for monitoring:
 
-- **TDS**: High influence on water quality classification
+- **Cl**: High influence on water quality classification
 
-- **Mg**: High influence on water quality classification
-
-- **HCO3**: High influence on water quality classification
+- **SO4**: High influence on water quality classification
 
 - **Na**: High influence on water quality classification
 
-- **pH**: High influence on water quality classification
+- **mandal**: High influence on water quality classification
+
+- **NO3**: High influence on water quality classification
 
 
 ## Risk Mitigation Scenarios

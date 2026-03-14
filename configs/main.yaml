@@ -90,8 +90,10 @@ data_quality:
   cleaning:
     drop_empty_columns: true
     resolve_label_typos: true
-    handle_rare_classes: "merge"  # "merge" to Other or "drop"
-    rare_class_threshold: 20  # Minimum samples per class (combined across all years)
+    # C#S# labels are mapped to 4 semantic risk tiers (USDA salinity-sodium
+    # hazard chart) — no frequency-based "Other" catch-all.
+    # Tier mapping: T1_Safe | T2_Marginal | T3_Restricted | T4_Unsafe
+    label_classification: "tier_mapping"
 
 # -----------------------------------------------------------------------------
 # LABEL CONFIGURATION
@@ -100,30 +102,27 @@ labels:
   target_column: "Classification"
   secondary_column: "Classification_RSC"  # For additional analysis
 
-  # Label typo resolution mapping
+  # Label typo resolution mapping (applied before tier mapping)
   typo_mapping:
     "O.G": "OG"
     "O.G.": "OG"
     " C2S1": "C2S1"
     "C2S1 ": "C2S1"
 
-  # Ordinal encoding for C and S components
-  # Classification format: C{1-4}S{1-4}
-  c_order: [1, 2, 3, 4]  # C1=excellent to C4=very high salinity
-  s_order: [1, 2, 3, 4]  # S1=excellent to S4=very high sodium
-
-  # High-risk class definition (for severity metrics).
-  # Note: C4S3, C4S4, C3S3, C3S4 are merged into "Other" when rare_class_threshold>=20,
-  # so only C4S1, C4S2 (and "Other" as partial high-risk) are kept here.
+  # 3-tier semantic risk classification (USDA salinity-sodium hazard chart).
+  # T4_Unsafe merged into T3_Restricted — transition data has <3 T4 samples.
+  #
+  #   T1_Safe        — C1S1, C1S2, C1S3, C2S1, OG           (unrestricted use)
+  #   T2_Marginal    — C1S4, C2S2, C2S3, C3S1, C3S2          (use with caution)
+  #   T3_Restricted  — C2S4, C3S3, C3S4, C4S1–C4S4           (restricted/unsafe)
+  #
+  # High-risk = T3_Restricted only (single merged high-risk tier)
   high_risk_classes:
-    - "C4S1"
-    - "C4S2"
-    - "Other"  # Contains merged high-risk classes (C3S3, C3S4, C4S3, C4S4)
+    - "T3_Restricted"
 
-  # Ordinal distance weights
+  # Ordinal distance computed as tier-level distance (max = 2 steps, 3-tier system)
   ordinal_weights:
-    c_weight: 1.0
-    s_weight: 1.0
+    tier_weight: 1.0
 
 # -----------------------------------------------------------------------------
 # PREPROCESSING CONFIGURATION
@@ -183,15 +182,16 @@ preprocessing:
 imbalance:
   # Resampling strategy applied to training data before optimization.
   # Options: smote_tomek | borderline_smote | adasyn | smote | ctgan | class_weights | none
-  strategy: "smote_tomek"
+  # Using smote with k=3 (small minority class) to boost T3_Restricted samples.
+  strategy: "smote"
 
   # Class weights are ALWAYS computed and passed to model loss functions.
   class_weights:
     method: "balanced"  # "balanced" (sklearn-style) | "sqrt" (less aggressive)
 
-  # SMOTE / BorderlineSMOTE / ADASYN options
+  # SMOTE options — k=3 because minority class has ~48 samples
   smote:
-    k_neighbors: 5
+    k_neighbors: 3
 
   # CTGAN options (only used when strategy = "ctgan")
   gan:
@@ -243,35 +243,35 @@ feature_selection:
 # MODEL CONFIGURATIONS
 # -----------------------------------------------------------------------------
 models:
-  # CatBoost
+  # CatBoost — Sample-1 inspired: high iterations, low LR, min_data_in_leaf
   catboost:
     enabled: true
     params:
-      iterations: [100, 500, 1000]
-      depth: [4, 6, 8, 10]
-      learning_rate: [0.01, 0.05, 0.1, 0.2]
+      iterations: [1000, 5000, 14000]        # Sample 1 used 14400
+      depth: [4, 6, 8]
+      learning_rate: [0.001, 0.003, 0.01, 0.05]  # Sample 1 used 0.003
       l2_leaf_reg: [1, 3, 5, 10]
-      border_count: [32, 64, 128]
-      cat_features: auto  # Will be set based on categorical_features
+      min_data_in_leaf: [10, 20, 27]         # Sample 1 used 27
+      cat_features: auto                      # Native categorical handling
     fixed_params:
       loss_function: "MultiClass"
       eval_metric: "MultiClass"
       random_seed: 42
       verbose: false
       use_best_model: true
-      early_stopping_rounds: 50
+      early_stopping_rounds: 100
 
-  # LightGBM
+  # LightGBM — extended n_estimators + lower LR ceiling
   lightgbm:
     enabled: true
     params:
-      n_estimators: [100, 500, 1000]
+      n_estimators: [500, 1000, 2000, 5000]
       max_depth: [4, 6, 8, 10]
-      learning_rate: [0.01, 0.05, 0.1, 0.2]
-      num_leaves: [31, 63, 127]
-      min_child_samples: [10, 20, 50]
-      reg_alpha: [0, 0.1, 1]
-      reg_lambda: [0, 0.1, 1]
+      learning_rate: [0.001, 0.005, 0.01, 0.05, 0.1]
+      num_leaves: [15, 31, 63, 127]
+      min_child_samples: [5, 10, 20, 50]
+      reg_alpha: [0, 0.1, 0.5, 1]
+      reg_lambda: [0, 0.1, 0.5, 1]
     fixed_params:
       objective: "multiclass"
       metric: "multi_logloss"

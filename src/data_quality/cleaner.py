@@ -3,7 +3,16 @@ Data Cleaner Module
 ===================
 
 Implements configurable cleaning actions based on validation results,
-including label resolution, missing value handling, and outlier treatment.
+including label resolution, tier classification, missing value handling,
+and outlier treatment.
+
+Label handling uses a 4-tier semantic risk system (USDA salinity-sodium
+hazard chart) instead of a frequency-based "Other" catch-all:
+
+    T1_Safe        — unrestricted use
+    T2_Marginal    — use with caution
+    T3_Restricted  — restricted use
+    T4_Unsafe      — unsuitable
 """
 
 import logging
@@ -14,6 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.impute import SimpleImputer
+
+from src.objectives.definitions import RISK_TIER_MAPPING, map_raw_label_to_tier
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +45,14 @@ class DataCleaner:
     Configurable data cleaner with explicit logging of all actions.
 
     All cleaning decisions are logged for reproducibility and audit trails.
+
+    Label classification uses a 4-tier semantic risk system based on the
+    USDA salinity-sodium hazard chart.  Every C#S# label maps to exactly
+    one tier — there is no frequency-based "Other" catch-all.
     """
 
     # Label cleaning
     label_typo_mapping: Dict[str, str] = field(default_factory=dict)
-    rare_class_handling: str = "merge"  # "merge" or "drop"
-    rare_class_threshold: int = 5
-    merge_target: str = "Other"
 
     # Missing value handling
     numeric_impute_strategy: str = "median"
@@ -85,8 +97,8 @@ class DataCleaner:
         # Step 2: Resolve label typos
         cleaned = self._resolve_label_typos(cleaned)
 
-        # Step 3: Handle rare classes
-        cleaned = self._handle_rare_classes(cleaned)
+        # Step 3: Map C#S# labels to 4-tier semantic risk system
+        cleaned = self._apply_tier_classification(cleaned)
 
         # Step 4: Create unified label encoder
         self._create_label_encoder(cleaned)
@@ -180,53 +192,54 @@ class DataCleaner:
 
         return data
 
-    def _handle_rare_classes(
+    def _apply_tier_classification(
         self,
         data: Dict[int, pd.DataFrame],
         target_col: str = 'Classification'
     ) -> Dict[int, pd.DataFrame]:
-        """Handle rare classes by merging or dropping."""
-        # Count classes across all years
-        all_counts = pd.Series(dtype=int)
-        for df in data.values():
-            if target_col in df.columns:
-                counts = df[target_col].value_counts()
-                all_counts = all_counts.add(counts, fill_value=0)
+        """
+        Map every C#S# label to one of four semantic risk tiers.
 
-        rare_classes = all_counts[all_counts < self.rare_class_threshold].index.tolist()
+        Tier mapping (USDA salinity-sodium hazard chart):
+            T1_Safe        — C1S1, C1S2, C1S3, C2S1, OG
+            T2_Marginal    — C1S4, C2S2, C2S3, C3S1, C3S2
+            T3_Restricted  — C2S4, C3S3, C3S4, C4S1, C4S2
+            T4_Unsafe      — C4S3, C4S4
 
-        if not rare_classes:
-            return data
-
-        logger.info(f"Found {len(rare_classes)} rare classes: {rare_classes}")
+        Unrecognised labels default to T2_Marginal (conservative).
+        This replaces the old frequency-based "Other" catch-all which
+        incorrectly mixed safe and dangerous samples in one bucket.
+        """
+        known_labels = set(RISK_TIER_MAPPING.keys())
 
         for year, df in data.items():
             if target_col not in df.columns:
                 continue
 
-            if self.rare_class_handling == "merge":
-                mask = df[target_col].isin(rare_classes)
-                n_affected = mask.sum()
-                if n_affected > 0:
-                    df.loc[mask, target_col] = self.merge_target
-                    self.cleaning_log.append(CleaningAction(
-                        action_type='merge_rare_classes',
-                        column=target_col, year=year,
-                        details={'merged_classes': rare_classes, 'to': self.merge_target},
-                        n_affected=n_affected
-                    ))
+            original = df[target_col].copy()
+            df[target_col] = df[target_col].apply(map_raw_label_to_tier)
 
-            elif self.rare_class_handling == "drop":
-                mask = df[target_col].isin(rare_classes)
-                n_affected = mask.sum()
-                if n_affected > 0:
-                    df = df[~mask]
-                    self.cleaning_log.append(CleaningAction(
-                        action_type='drop_rare_classes',
-                        column=target_col, year=year,
-                        details={'dropped_classes': rare_classes},
-                        n_affected=n_affected
-                    ))
+            n_changed = (original != df[target_col]).sum()
+            unrecognised = set(original.unique()) - known_labels - {'nan', 'NaN', 'None'}
+            if unrecognised:
+                logger.warning(
+                    f"Year {year}: unrecognised labels defaulted to T2_Marginal: {unrecognised}"
+                )
+
+            self.cleaning_log.append(CleaningAction(
+                action_type='apply_tier_classification',
+                column=target_col, year=year,
+                details={
+                    'tier_mapping': 'USDA 4-tier salinity-sodium hazard',
+                    'n_mapped': int(n_changed),
+                    'unrecognised_labels': list(unrecognised),
+                },
+                n_affected=int(n_changed)
+            ))
+            logger.info(
+                f"Year {year}: mapped {n_changed} labels to risk tiers. "
+                f"Distribution: {df[target_col].value_counts().to_dict()}"
+            )
 
             data[year] = df
 
@@ -237,23 +250,26 @@ class DataCleaner:
         data: Dict[int, pd.DataFrame],
         target_col: str = 'Classification'
     ):
-        """Create unified label encoder across all years."""
+        """Create unified label encoder across all years.
+
+        Tiers are sorted in ordinal order T1 < T2 < T3 < T4 so that
+        the integer indices preserve the risk ordering.
+        """
         all_classes = set()
         for df in data.values():
             if target_col in df.columns:
                 all_classes.update(df[target_col].dropna().unique())
 
-        # Sort classes by C and S components for ordinal ordering
+        # Sort by tier number (T1_Safe → 0, T2_Marginal → 1, …)
+        _tier_order = {'T1_Safe': 0, 'T2_Marginal': 1, 'T3_Restricted': 2, 'T4_Unsafe': 3}
+
         def sort_key(label):
-            match = re.match(r'C(\d)S(\d)', str(label))
-            if match:
-                return (int(match.group(1)), int(match.group(2)))
-            return (99, 99)  # Put non-standard labels at end
+            return _tier_order.get(str(label), 99)
 
         sorted_classes = sorted(all_classes, key=sort_key)
         self.label_encoder = {cls: idx for idx, cls in enumerate(sorted_classes)}
 
-        logger.info(f"Label encoder created with {len(self.label_encoder)} classes")
+        logger.info(f"Label encoder created with {len(self.label_encoder)} tiers: {self.label_encoder}")
         logger.debug(f"Label mapping: {self.label_encoder}")
 
     def _fit_imputers(self, df: pd.DataFrame):

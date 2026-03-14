@@ -233,13 +233,18 @@ class PreprocessingPipeline:
                 }
 
     def _fit_label_encoder(self, y: pd.Series):
-        """Fit label encoder for target."""
+        """Fit label encoder for target with correct ordering for tier names or C#S# labels."""
+        import re
         unique_labels = y.dropna().unique()
 
-        # Sort by C and S components for ordinal ordering
-        import re
+        # Tier order for the 3-tier semantic system (T1 < T2 < T3)
+        _tier_order = {'T1_Safe': 0, 'T2_Marginal': 1, 'T3_Restricted': 2, 'T4_Unsafe': 3}
+
         def sort_key(label):
-            match = re.match(r'C(\d)S(\d)', str(label))
+            s = str(label)
+            if s in _tier_order:
+                return (_tier_order[s], 0)
+            match = re.match(r'C(\d)S(\d)', s)
             if match:
                 return (int(match.group(1)), int(match.group(2)))
             return (99, 99)
