@@ -377,7 +377,8 @@ def run_pipeline(config_path: str):
         log_file=get_config_value(config, 'output', 'logs', default='outputs/logs') + '/pipeline.log'
     )
 
-    set_seed(get_config_value(config, 'reproducibility', 'global_seed', default=42))
+    random_state = get_config_value(config, 'reproducibility', 'global_seed', default=42)
+    set_seed(random_state)
 
     logger.info("=" * 60)
     logger.info("GROUNDWATER QUALITY FORECASTING PIPELINE")
@@ -556,7 +557,6 @@ def run_pipeline(config_path: str):
     logger.info("\n[STAGE D2] Imbalance Handling")
 
     imbalance_config = config.get('imbalance', {})
-    random_state = get_config_value(config, 'reproducibility', 'global_seed', default=42)
 
     imbalance_handler = ImbalanceHandler(
         strategy=imbalance_config.get('strategy', 'smote'),

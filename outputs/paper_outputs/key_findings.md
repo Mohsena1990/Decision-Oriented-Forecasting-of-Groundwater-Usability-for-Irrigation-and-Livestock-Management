@@ -4,8 +4,8 @@
 
 - **Best Model**: CatBoost
 
-- **Macro F1**: 0.338
+- **Macro F1**: 0.547
 
-- **Severe FNR**: 0.213
+- **Severe FNR**: 0.596
 
 - **Ordinal Distance**: N/A

@@ -547,7 +547,7 @@ class RAEImputer:
             self._model.parameters(), lr=self.lr, weight_decay=1e-5
         )
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, patience=10, factor=0.5, verbose=False
+            optimizer, patience=10, factor=0.5
         )
 
         best_loss = float("inf")
