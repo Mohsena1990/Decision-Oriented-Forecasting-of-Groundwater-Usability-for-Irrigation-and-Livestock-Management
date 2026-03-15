@@ -23,6 +23,7 @@ is never penalised for reconstructing values we don't know.  After training,
 reconstructed values are spliced in only where the original data was NaN.
 """
 
+import copy
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -439,20 +440,28 @@ class RAEImputer:
             df = data_dict[year]
             avail_loc = [c for c in location_keys if c in df.columns]
 
-            for _, row in df.iterrows():
-                loc_id = tuple(
-                    str(row[k]).upper().strip() for k in avail_loc
-                )
+            # Vectorised location-key extraction (avoids iterrows)
+            loc_ids_arr = (
+                df[avail_loc]
+                .astype(str)
+                .apply(lambda r: tuple(v.upper().strip() for v in r), axis=1)
+            )
+
+            # Vectorised feature extraction — missing cols filled with NaN
+            feat_matrix = np.full(
+                (len(df), len(feature_cols)), np.nan, dtype=np.float32
+            )
+            for fi, fc in enumerate(feature_cols):
+                if fc in df.columns:
+                    feat_matrix[:, fi] = pd.to_numeric(
+                        df[fc], errors="coerce"
+                    ).values.astype(np.float32)
+
+            for row_pos, loc_id in enumerate(loc_ids_arr):
                 if loc_id not in loc_data:
                     loc_data[loc_id] = {}
                     loc_order.append(loc_id)
-
-                feat = np.array(
-                    [pd.to_numeric(row.get(c, np.nan), errors="coerce")
-                     for c in feature_cols],
-                    dtype=np.float32,
-                )
-                loc_data[loc_id][year] = feat
+                loc_data[loc_id][year] = feat_matrix[row_pos]
 
         n_locs = len(loc_order)
         sequences = np.zeros((n_locs, n_years, n_features), dtype=np.float32)
@@ -481,15 +490,22 @@ class RAEImputer:
         years: List[int],
     ) -> List[tuple]:
         """Return ordered list of unique location tuples across years."""
-        seen = set()
+        seen: set = set()
         ordered: List[tuple] = []
         for year in sorted(years):
             if year not in data_dict:
                 continue
             df = data_dict[year]
             avail = [c for c in location_keys if c in df.columns]
-            for _, row in df.iterrows():
-                loc_id = tuple(str(row[k]).upper().strip() for k in avail)
+            if not avail:
+                continue
+            # Vectorised: compute all loc-id tuples at once
+            loc_ids = (
+                df[avail]
+                .astype(str)
+                .apply(lambda r: tuple(v.upper().strip() for v in r), axis=1)
+            )
+            for loc_id in loc_ids:
                 if loc_id not in seen:
                     seen.add(loc_id)
                     ordered.append(loc_id)
@@ -535,6 +551,7 @@ class RAEImputer:
         )
 
         best_loss = float("inf")
+        best_state: Optional[dict] = None   # checkpointed weights at best loss
         patience_counter = 0
 
         self._model.train()
@@ -571,6 +588,8 @@ class RAEImputer:
             if avg_loss < best_loss - 1e-6:
                 best_loss = avg_loss
                 patience_counter = 0
+                # Checkpoint the best weights so early-stop restores them
+                best_state = copy.deepcopy(self._model.state_dict())
             else:
                 patience_counter += 1
 
@@ -586,6 +605,10 @@ class RAEImputer:
                     f"RAE epoch {epoch + 1}/{self.n_epochs}: "
                     f"loss={avg_loss:.6f}"
                 )
+
+        # Restore best weights before switching to eval mode
+        if best_state is not None:
+            self._model.load_state_dict(best_state)
 
         self._model.eval()
         logger.info(f"RAE training done — best loss: {best_loss:.6f}")
@@ -626,6 +649,8 @@ class RAEImputer:
 
         Only positions that were originally NaN (mask=0) are updated;
         observed values are left untouched.
+
+        Vectorised — avoids iterrows for O(N·F) → O(F) per year performance.
         """
         years = sorted(years)
         loc_idx: Dict[tuple, int] = {lid: i for i, lid in enumerate(loc_ids)}
@@ -641,26 +666,37 @@ class RAEImputer:
                 continue
             df = result[year]
             avail_loc = [c for c in location_keys if c in df.columns]
+            avail_feat = [c for c in feature_cols if c in df.columns]
+            if not avail_loc or not avail_feat:
+                continue
 
-            for row_i, row in df.iterrows():
-                loc_id = tuple(
-                    str(row[k]).upper().strip() for k in avail_loc
-                )
-                if loc_id not in loc_idx:
-                    continue
-                seq_i = loc_idx[loc_id]
+            # Map each row → sequence index (-1 means unknown location)
+            loc_id_series = (
+                df[avail_loc]
+                .astype(str)
+                .apply(lambda r: tuple(v.upper().strip() for v in r), axis=1)
+            )
+            seq_indices = loc_id_series.map(
+                lambda lid: loc_idx.get(lid, -1)
+            )
 
-                for f_idx, feat_col in enumerate(feature_cols):
-                    if feat_col not in df.columns:
-                        continue
-                    was_missing = (
-                        pd.isna(row[feat_col])
-                        or masks[seq_i, y_idx, f_idx] == 0
-                    )
-                    if was_missing:
-                        df.at[row_i, feat_col] = float(
-                            imputed[seq_i, y_idx, f_idx]
-                        )
+            valid_mask = seq_indices.values >= 0
+            if not valid_mask.any():
+                continue
+
+            valid_df_idx = df.index[valid_mask]            # original row labels
+            valid_seq_idx = seq_indices.values[valid_mask]  # int array
+
+            feat_pos = [feature_cols.index(c) for c in avail_feat]
+
+            for f_col, f_idx in zip(avail_feat, feat_pos):
+                orig_nan = df.loc[valid_df_idx, f_col].isna().values
+                mask_zero = masks[valid_seq_idx, y_idx, f_idx] == 0
+                needs_fill = orig_nan | mask_zero
+                if needs_fill.any():
+                    rows_to_fill = valid_df_idx[needs_fill]
+                    fill_vals = imputed[valid_seq_idx[needs_fill], y_idx, f_idx].astype(float)
+                    df.loc[rows_to_fill, f_col] = fill_vals
 
         return result
 

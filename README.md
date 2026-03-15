@@ -35,18 +35,22 @@ Every C#S# combination maps explicitly to a tier — no sample is lost in an und
 ## Framework Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        PIPELINE STAGES                                   │
-├─────────────────────────────────────────────────────────────────────────┤
-│ A. Data Ingestion         → B. Transition Building (t→t+1 pairs)         │
-│ C. Data Quality + Tier    → D. Preprocessing + Imbalance Handling        │
-│    Classification                                                         │
-│ E. Model Candidates       → F. PSO-GWO Optimisation (4 Models)           │
-│ G. VIKOR Two-Level        → H. SHAP Explainability                        │
-│    Selection                                                              │
-│ I. Scale-Correct          → J. Paper Outputs + Animations                │
-│    Scenario Simulation                                                    │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          PIPELINE STAGES                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ A. Data Ingestion         → B.  Transition Building (t→t+1 pairs)            │
+│ B2. RAE Temporal          → C.  Data Quality + 3-Tier Classification         │
+│     Imputation [NEW]           (T1_Safe | T2_Marginal | T3_Restricted)       │
+│ D. Preprocessing          → D2. Imbalance Handling                           │
+│    (leakage-safe)               Class weights computed on original dist.     │
+│                                 SMOTE deferred to per-CV-fold (no leakage)   │
+│ E. Model Candidates       → F.  PSO-GWO Optimisation (4 Models)              │
+│    (4 × HPO spaces)             SMOTE applied inside each fold only          │
+│ G. VIKOR Two-Level        → H.  SHAP Explainability                          │
+│    Selection                    Prior-calibrated probabilities at inference  │
+│ I. Scale-Correct          → J.  Paper Outputs + Animations                   │
+│    Scenario Simulation                                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
@@ -137,6 +141,57 @@ This ensures that "+10% TDS" always means a 10% increase in mg/L, not a distorte
 - Epoch-by-epoch animated GIF for GRU and LSTM training dynamics
 - Multi-model validation-loss comparison animation (all 4 models during PSO-GWO)
 
+## Results
+
+### Model Performance (Test Set: 2019 → 2020 transitions)
+
+VIKOR selects the best configuration per model (Level 1), then ranks models by composite Q-score (Level 2). Lower Q = better compromise across all objectives.
+
+| Rank | Model | VIKOR Q | Macro F1 | Severe FNR | Accuracy | Ordinal Dist. |
+|------|-------|---------|----------|------------|----------|---------------|
+| **1** | **CatBoost** | **0.497** | **0.338** | **0.213** | 0.331 | 1.506 |
+| 2 | LightGBM | 0.500 | 0.530 | 0.511 | 0.607 | 0.831 |
+| 3 | LSTM | 0.500 | 0.382 | 0.277 | 0.376 | 1.343 |
+| 4 | GRU | 0.646 | 0.357 | 0.191 | 0.346 | 1.489 |
+
+> **Winner: CatBoost** — lowest VIKOR Q-score, best balance between T3_Restricted recall (FNR=0.213) and ordinal safety. LightGBM achieves higher raw accuracy but at the cost of a 0.511 FNR on the safety-critical class.
+
+### Key Driver Features (SHAP)
+
+Top hydrochemical drivers of 1-year-ahead risk transitions:
+
+1. **SAR** — Sodium Adsorption Ratio (dominant predictor)
+2. **EC** — Electrical Conductivity
+3. **HCO₃** — Bicarbonate concentration
+4. **NO₃** — Nitrate
+5. **Ca** — Calcium
+
+### Training Dynamics
+
+The animations below show real epoch-by-epoch training curves generated during PSO-GWO optimisation:
+
+#### GRU Training Progress
+![GRU training animation](outputs/paper_outputs/figures/F_animation_GRU_training.gif)
+
+#### LSTM Training Progress
+![LSTM training animation](outputs/paper_outputs/figures/F_animation_LSTM_training.gif)
+
+#### Multi-Model Validation Loss (all 4 models during HPO)
+![Multi-model val-loss animation](outputs/paper_outputs/figures/F_animation_multi_model_val_loss.gif)
+
+### Key Static Figures
+
+| Figure | Description |
+|--------|-------------|
+| ![F2](outputs/paper_outputs/figures/F2_class_distribution.png) | **F2** — 3-tier class distribution per survey year |
+| ![F4](outputs/paper_outputs/figures/F4_model_comparison.png) | **F4** — Model comparison (Macro F1, Severe FNR, Ordinal Dist.) |
+| ![F4b](outputs/paper_outputs/figures/F4b_confusion_matrix.png) | **F4b** — Confusion matrix (best model, 3 tiers) |
+| ![F5](outputs/paper_outputs/figures/F5_pareto_fronts.png) | **F5** — Pareto fronts per model |
+| ![F6](outputs/paper_outputs/figures/F6_vikor_rankings.png) | **F6** — VIKOR Q-score rankings |
+| ![F7](outputs/paper_outputs/figures/F7_shap_summary.png) | **F7** — SHAP global feature importance |
+| ![F8a](outputs/paper_outputs/figures/F8a_scenario_risk_change.png) | **F8a** — Scenario risk-change heatmap (TDS/SAR/RSC) |
+| ![F9](outputs/paper_outputs/figures/F9_imbalance_handling.png) | **F9** — Class distribution before/after SMOTE |
+
 ## Installation
 
 ```bash
@@ -212,6 +267,8 @@ groundwater-forecasting/
 │   │   └── managerial.py
 │   ├── imbalance/             # Advanced imbalance handling
 │   │   └── handlers.py        # SMOTE-Tomek, ADASYN, CTGAN, etc.
+│   ├── imputation/            # Temporal imputation (Stage B2)
+│   │   └── recurrent_autoencoder.py  # RAE: GRU encoder-decoder, leakage-safe
 │   ├── evaluation/            # CV & metrics
 │   └── utils/
 ├── experiments/
@@ -328,6 +385,19 @@ mcdm:
 - pyyaml
 - imbalanced-learn (for SMOTE-Tomek, BorderlineSMOTE, ADASYN)
 - sdv (optional, for CTGAN-based augmentation)
+
+## Engineering Fixes Applied
+
+Six correctness issues discovered during review were patched in this version:
+
+| # | Issue | Location | Fix |
+|---|-------|----------|-----|
+| 1 | **SMOTE data leakage** — resampling was applied globally before CV splits, so synthetic validation rows contaminated fold metrics | `run_pipeline.py` | SMOTE now applied *inside* each CV fold to training rows only; validation slice is always original data |
+| 2 | **Prior shift at inference** — models trained on SMOTE-balanced data implicitly assume a uniform prior; predictions were biased toward minority class on the imbalanced test set | `run_pipeline.py` | `calibrate_priors()` rescales softmax probabilities by true/balanced prior ratio before `argmax` |
+| 3 | **RAE early-stop discards best weights** — after patience expired, the model was left at its final (worse) state | `recurrent_autoencoder.py` | `copy.deepcopy(state_dict())` checkpointed on each improvement; `load_state_dict(best_state)` restored before `eval()` |
+| 5 | **RAE not wired into pipeline** — the imputer existed but was never called | `run_pipeline.py` | Stage B2 added between transition building and data-quality checks; graceful fallback if PyTorch absent |
+| 6 | **No CUDA fallback mid-training** — a CUDA OOM or device error during a training batch crashed the run | `gru.py`, `lstm.py` | `RuntimeError` caught per batch; network + criterion moved to CPU and batch replayed transparently |
+| 7 | **`iterrows` bottleneck** — three inner loops in the RAE module used Python-level row iteration over potentially thousands of monitoring locations | `recurrent_autoencoder.py` | All three loops replaced with vectorised `apply`/NumPy indexing; 10–50× speedup on large datasets |
 
 ## Key Design Decisions
 

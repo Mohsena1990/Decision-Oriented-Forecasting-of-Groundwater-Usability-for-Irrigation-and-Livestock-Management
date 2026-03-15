@@ -233,17 +233,40 @@ class LSTMForecaster(BaseForecaster):
             train_loss = 0.0
 
             for x_num, x_cat, targets in train_loader:
-                x_num = x_num.to(self._device)
-                x_cat = x_cat.to(self._device)
-                targets = targets.to(self._device)
+                try:
+                    x_num = x_num.to(self._device)
+                    x_cat = x_cat.to(self._device)
+                    targets = targets.to(self._device)
 
-                optimizer.zero_grad()
-                outputs = self._network(x_num, x_cat)
-                loss = criterion(outputs, targets)
-                loss.backward()
-                optimizer.step()
+                    optimizer.zero_grad()
+                    outputs = self._network(x_num, x_cat)
+                    loss = criterion(outputs, targets)
+                    loss.backward()
+                    optimizer.step()
 
-                train_loss += loss.item()
+                    train_loss += loss.item()
+
+                except RuntimeError as cuda_err:
+                    if "CUDA" in str(cuda_err) or "cuda" in str(cuda_err):
+                        logger.warning(
+                            f"LSTM CUDA error mid-training (epoch {epoch + 1}): "
+                            f"{cuda_err!s:.120} — falling back to CPU."
+                        )
+                        self._device = torch.device("cpu")
+                        self._network = self._network.cpu()
+                        criterion = criterion.cpu() if hasattr(criterion, "cpu") else criterion
+                        # Re-run this batch on CPU
+                        x_num = x_num.cpu()
+                        x_cat = x_cat.cpu()
+                        targets = targets.cpu()
+                        optimizer.zero_grad()
+                        outputs = self._network(x_num, x_cat)
+                        loss = criterion(outputs, targets)
+                        loss.backward()
+                        optimizer.step()
+                        train_loss += loss.item()
+                    else:
+                        raise
 
             self.training_history['train_loss'].append(train_loss / len(train_loader))
 

@@ -42,6 +42,14 @@ from src.preprocessing import PreprocessingPipeline, LabelParser, OrdinalEncoder
 from src.evaluation import TemporalSplitter, CrossValidator, MetricsCalculator
 from src.imbalance import ImbalanceHandler
 
+# RAE imputation (optional — graceful fallback if PyTorch absent)
+try:
+    from src.imputation import RAEImputer, TORCH_AVAILABLE as RAE_TORCH_AVAILABLE
+    RAE_AVAILABLE = True
+except ImportError:
+    RAE_AVAILABLE = False
+    RAE_TORCH_AVAILABLE = False
+
 # All 4 models
 from src.models.trees import CatBoostForecaster, LightGBMForecaster
 from src.models.base import ForecasterConfig, compute_class_weights
@@ -256,11 +264,16 @@ def create_objective_function(
     param_bounds: Dict[str, Tuple[float, float]],
     param_types: Dict[str, str],
     n_features: int,
-    categorical_indices: Optional[List[int]] = None
+    categorical_indices: Optional[List[int]] = None,
+    imbalance_handler: Optional[Any] = None,
 ) -> Callable[[np.ndarray], np.ndarray]:
     """
     Create objective function for PSO-GWO optimization.
-    Feature selection is disabled — all features are always used.
+
+    SMOTE (if configured) is applied *inside* each CV fold so that synthetic
+    samples derived from fold-k training rows never contaminate fold-k
+    validation rows.  The validation slice is always drawn from the original,
+    unaugmented data.  Feature selection is disabled — all features are used.
     """
     lower, upper, mapping = create_search_space(
         param_bounds, n_features, include_feature_mask=False
@@ -272,8 +285,19 @@ def create_objective_function(
         all_objectives = []
 
         for train_idx, val_idx in cv_splits:
-            X_tr, X_val = X_train[train_idx], X_train[val_idx]
-            y_tr, y_val = y_train[train_idx], y_train[val_idx]
+            # Validation always comes from the *original* unbalanced data
+            X_tr_raw, X_val = X_train[train_idx], X_train[val_idx]
+            y_tr_raw, y_val = y_train[train_idx], y_train[val_idx]
+
+            # Apply SMOTE only to the training fold (not the validation fold)
+            if imbalance_handler is not None:
+                try:
+                    X_tr, y_tr = imbalance_handler.resample(X_tr_raw, y_tr_raw)
+                except Exception as resample_err:
+                    logger.debug(f"Fold resampling skipped: {resample_err}")
+                    X_tr, y_tr = X_tr_raw, y_tr_raw
+            else:
+                X_tr, y_tr = X_tr_raw, y_tr_raw
 
             try:
                 model = model_factory(params)
@@ -300,6 +324,44 @@ def create_objective_function(
         return np.mean(all_objectives, axis=0)
 
     return objective_fn, lower, upper, mapping
+
+
+# ---------------------------------------------------------------------------
+# Prior-probability calibration
+# ---------------------------------------------------------------------------
+
+def calibrate_priors(
+    proba: np.ndarray,
+    original_class_counts: np.ndarray,
+) -> np.ndarray:
+    """
+    Rescale predicted probabilities to correct for the prior shift introduced
+    by SMOTE (which trains on a balanced distribution).
+
+    After SMOTE the model implicitly uses a uniform prior (1/n_classes per
+    class).  Multiplying each column by the true prior / (1/n_classes) and
+    re-normalising restores the original marginal distribution, reducing
+    over-prediction of the minority class on the imbalanced test set.
+
+    Parameters
+    ----------
+    proba : ndarray (n_samples, n_classes)
+        Raw softmax probabilities from the model.
+    original_class_counts : ndarray (n_classes,)
+        Number of training samples per class *before* resampling.
+
+    Returns
+    -------
+    ndarray (n_samples, n_classes) — calibrated and re-normalised.
+    """
+    total = original_class_counts.sum()
+    n_classes = len(original_class_counts)
+    true_prior = original_class_counts / total          # shape (n_classes,)
+    balanced_prior = np.ones(n_classes) / n_classes    # SMOTE-induced prior
+    scales = true_prior / balanced_prior               # (n_classes,)
+    calibrated = proba * scales[np.newaxis, :]
+    row_sums = calibrated.sum(axis=1, keepdims=True).clip(min=1e-12)
+    return calibrated / row_sums
 
 
 # =============================================================================
@@ -421,32 +483,112 @@ def run_pipeline(config_path: str):
     categorical_indices = pipeline.get_categorical_indices() if hasattr(pipeline, 'get_categorical_indices') else []
 
     # =========================================================================
-    # STAGE D2: Imbalance Handling (class weights + resampling)
+    # STAGE B2: RAE Temporal Imputation  [leakage-safe]
+    # =========================================================================
+    logger.info("\n[STAGE B2] Recurrent Autoencoder (RAE) Temporal Imputation")
+
+    rae_cfg = config.get('rae_imputation', {})
+    if RAE_AVAILABLE and rae_cfg.get('enabled', True):
+        preproc_cfg = config.get('preprocessing', {})
+        numeric_feature_cols = preproc_cfg.get('numeric_features', [
+            'pH', 'EC', 'TDS', 'CO3', 'HCO3', 'Cl', 'F', 'NO3', 'SO4',
+            'Na', 'K', 'Ca', 'Mg', 'TH', 'SAR', 'RSC',
+        ])
+        rae_location_keys = data_config.get('location_keys', ['district', 'mandal', 'village'])
+        all_years = sorted(cleaned_data.keys())
+        train_years_rae = all_years[:-1]   # fit on all years except held-out test year
+
+        rae = RAEImputer(
+            hidden_size=rae_cfg.get('hidden_size', 64),
+            latent_size=rae_cfg.get('latent_size', 32),
+            n_layers=rae_cfg.get('n_layers', 1),
+            dropout=rae_cfg.get('dropout', 0.1),
+            n_epochs=rae_cfg.get('n_epochs', 200),
+            lr=rae_cfg.get('lr', 1e-3),
+            batch_size=rae_cfg.get('batch_size', 32),
+            patience=rae_cfg.get('patience', 30),
+            random_state=random_state,
+        )
+
+        if not RAE_TORCH_AVAILABLE:
+            logger.warning(
+                "PyTorch unavailable — RAE will use median-imputation fallback. "
+                "Install PyTorch (pip install torch) to enable the full GRU architecture."
+            )
+
+        missing_before = sum(
+            df[[c for c in numeric_feature_cols if c in df.columns]].isna().sum().sum()
+            for df in cleaned_data.values()
+        )
+        cleaned_data = rae.fit_transform(
+            cleaned_data, rae_location_keys, numeric_feature_cols,
+            train_years=train_years_rae,
+        )
+        missing_after = sum(
+            df[[c for c in numeric_feature_cols if c in df.columns]].isna().sum().sum()
+            for df in cleaned_data.values()
+        )
+        logger.info(
+            f"  RAE: {missing_before} → {missing_after} missing values "
+            f"(imputed {missing_before - missing_after})"
+        )
+
+        # Rebuild transitions on imputed data
+        transitions = transition_builder.build_all_transitions(cleaned_data, target_col='Classification')
+        train_df, test_df = splitter.split(transitions)
+        X_train, y_train, feature_names = pipeline.fit_transform(train_df, scale_features=True)
+        X_test, y_test, _ = pipeline.transform(test_df, scale_features=True)
+
+        train_mask = y_train >= 0
+        test_mask = y_test >= 0 if y_test is not None else np.ones(len(X_test), dtype=bool)
+        X_train, y_train = X_train[train_mask], y_train[train_mask]
+        X_test, y_test = X_test[test_mask], y_test[test_mask]
+        logger.info(f"  Post-RAE shapes — Train: {X_train.shape}, Test: {X_test.shape}")
+    else:
+        if not RAE_AVAILABLE:
+            logger.warning("RAE module not importable — skipping temporal imputation.")
+        else:
+            logger.info("RAE imputation disabled in config (rae_imputation.enabled = false).")
+
+    # =========================================================================
+    # STAGE D2: Imbalance Handling (class weights only — resampling deferred to CV)
     # =========================================================================
     logger.info("\n[STAGE D2] Imbalance Handling")
 
     imbalance_config = config.get('imbalance', {})
+    random_state = get_config_value(config, 'reproducibility', 'global_seed', default=42)
+
     imbalance_handler = ImbalanceHandler(
-        strategy=imbalance_config.get('strategy', 'smote_tomek'),
+        strategy=imbalance_config.get('strategy', 'smote'),
         weight_method=imbalance_config.get('class_weights', {}).get('method', 'balanced'),
-        smote_k_neighbors=imbalance_config.get('smote', {}).get('k_neighbors', 5),
+        smote_k_neighbors=imbalance_config.get('smote', {}).get('k_neighbors', 3),
         gan_epochs=imbalance_config.get('gan', {}).get('epochs', 300),
-        random_state=get_config_value(config, 'reproducibility', 'global_seed', default=42)
+        random_state=random_state,
     )
     imbalance_handler.fit(y_train)
     class_weights = imbalance_handler.get_class_weights()
-    logger.info(f"Class weights: {class_weights}")
+    logger.info(f"Class weights (from original distribution): {class_weights}")
 
-    # Apply resampling to training data
+    # Record original per-class counts for prior calibration at inference time.
+    # SMOTE is NOT applied globally here — it is applied inside each CV fold
+    # inside create_objective_function() so that synthetic samples from the
+    # training fold never contaminate the validation fold.
+    unique_classes, original_class_counts = np.unique(y_train, return_counts=True)
+    logger.info(
+        f"Original class distribution: "
+        f"{dict(zip(unique_classes.tolist(), original_class_counts.tolist()))}"
+    )
+
+    # For the *final* model fit (after HPO), apply SMOTE once to the full
+    # training set — this is leakage-free because the test set is separate.
     X_train_balanced, y_train_balanced = imbalance_handler.resample(X_train, y_train)
     logger.info(
-        f"Resampled train: {len(y_train)} -> {len(y_train_balanced)} samples | "
+        f"Final-fit resampled train: {len(y_train)} → {len(y_train_balanced)} samples | "
         f"class dist: {dict(zip(*np.unique(y_train_balanced, return_counts=True)))}"
     )
 
     n_classes = len(np.unique(y_train_balanced))
     n_features = X_train_balanced.shape[1]
-    random_state = get_config_value(config, 'reproducibility', 'global_seed', default=42)
 
     # =========================================================================
     # STAGE E: Setup for Optimization
@@ -474,7 +616,9 @@ def run_pipeline(config_path: str):
     cv_config = eval_config.get('inner_cv', {})
     n_splits = cv_config.get('n_splits', 5)
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    cv_splits = list(cv.split(X_train_balanced, y_train_balanced))
+    # Use the *original* (pre-SMOTE) training set for CV fold indices so that
+    # the validation slice is always clean, unaugmented data.
+    cv_splits = list(cv.split(X_train, y_train))
 
     opt_config = config.get('optimization', {})
     population_size = opt_config.get('population_size', 30)
@@ -533,9 +677,10 @@ def run_pipeline(config_path: str):
         model_factories[model_name] = factory
 
         obj_fn, lower, upper, mapping = create_objective_function(
-            X_train_balanced, y_train_balanced, factory, objective_calculator,
+            X_train, y_train, factory, objective_calculator,
             cv_splits, param_bounds, param_types, n_features,
-            categorical_indices=cat_idx
+            categorical_indices=cat_idx,
+            imbalance_handler=imbalance_handler,
         )
 
         def make_decoder(param_types_local, mapping_local):
@@ -638,8 +783,9 @@ def run_pipeline(config_path: str):
         if hasattr(model, 'training_history'):
             model_histories[model_name] = model.training_history
 
-        y_pred = model.predict(X_test)
-        y_proba = model.predict_proba(X_test)
+        y_proba_raw = model.predict_proba(X_test)
+        y_proba = calibrate_priors(y_proba_raw, original_class_counts)
+        y_pred = np.argmax(y_proba, axis=1)
 
         test_objectives = objective_calculator.compute_objectives(
             y_test, y_pred, y_proba,
@@ -837,8 +983,14 @@ def run_pipeline(config_path: str):
     )
 
     for model_name, model in final_models.items():
-        y_pred = model.predict(X_test)
-        y_proba = model.predict_proba(X_test)
+        y_proba_raw = model.predict_proba(X_test)
+
+        # Prior calibration: undo the balanced-prior bias introduced by SMOTE.
+        # Models trained on SMOTE-balanced data use an implicit uniform prior;
+        # rescaling by the true training prior reduces over-prediction of the
+        # minority class on the imbalanced test set.
+        y_proba = calibrate_priors(y_proba_raw, original_class_counts)
+        y_pred = np.argmax(y_proba, axis=1)
 
         metrics = metrics_calc.compute_all(y_test, y_pred, y_proba)
         metrics['Model'] = model_name

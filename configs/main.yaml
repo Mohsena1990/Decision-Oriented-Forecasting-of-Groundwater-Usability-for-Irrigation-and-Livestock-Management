@@ -177,6 +177,24 @@ preprocessing:
     fit_on_train_only: true
 
 # -----------------------------------------------------------------------------
+# RAE TEMPORAL IMPUTATION  (Stage B2 — leakage-safe, fits on train years only)
+# -----------------------------------------------------------------------------
+rae_imputation:
+  enabled: true          # set false to skip RAE and use downstream median imputation
+
+  # GRU encoder-decoder architecture
+  hidden_size: 64        # GRU hidden state dimension
+  latent_size: 32        # Bottleneck (latent code) dimension
+  n_layers: 1            # Number of GRU layers (dropout only active when > 1)
+  dropout: 0.1           # Dropout between GRU layers
+
+  # Training
+  n_epochs: 200          # Maximum training epochs (early-stop usually triggers before)
+  lr: 0.001              # Adam learning rate
+  batch_size: 32         # Mini-batch size
+  patience: 30           # Early-stopping patience (epochs without improvement)
+
+# -----------------------------------------------------------------------------
 # IMBALANCE HANDLING
 # -----------------------------------------------------------------------------
 imbalance:

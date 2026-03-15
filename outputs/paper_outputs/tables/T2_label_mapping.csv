@@ -2,4 +2,3 @@ Label,Index,C_Component,S_Component,High_Risk
 T1_Safe,0,,,No
 T2_Marginal,1,,,No
 T3_Restricted,2,,,Yes
-T4_Unsafe,3,,,Yes

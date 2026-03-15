@@ -4,15 +4,15 @@
 
 Based on the analysis, the following parameters should be prioritized for monitoring:
 
-- **Cl**: High influence on water quality classification
+- **SAR**: High influence on water quality classification
 
-- **SO4**: High influence on water quality classification
+- **EC**: High influence on water quality classification
 
-- **Na**: High influence on water quality classification
-
-- **mandal**: High influence on water quality classification
+- **HCO3**: High influence on water quality classification
 
 - **NO3**: High influence on water quality classification
+
+- **Ca**: High influence on water quality classification
 
 
 ## Risk Mitigation Scenarios
