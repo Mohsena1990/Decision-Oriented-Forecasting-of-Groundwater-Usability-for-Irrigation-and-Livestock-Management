@@ -22,26 +22,33 @@ class ObjectiveCalculator:
 
     Objectives (all to be minimized):
     1. Ordinal distance error
-    2. Severe-risk false negative rate
+    2. Severe-risk false negative rate (safety-critical)
     3. 1 - MacroF1
     4. Complexity (number of features)
+
+    Enhancement: asymmetric cost matrix penalises T3→T1 false negatives
+    10× more than T1→T3 false positives.
     """
 
     # Label information
-    label_to_ordinal: Dict[str, Tuple[int, int]] = field(default_factory=dict)
+    label_to_ordinal: Dict[str, int] = field(default_factory=dict)
     idx_to_label: Dict[int, str] = field(default_factory=dict)
     high_risk_indices: List[int] = field(default_factory=list)
 
-    # Ordinal weights
-    c_weight: float = 1.0
-    s_weight: float = 1.0
+    # Ordinal weight (single tier dimension after 3-tier merge)
+    tier_weight: float = 1.0
 
-    # Objective weights (for weighted sum if needed)
+    # Asymmetric cost matrix weights
+    severe_fn_cost: float = 10.0   # T3→T1/T2 false negative cost
+    severe_fp_cost: float = 2.0    # T1/T2→T3 false positive cost
+    use_cost_matrix: bool = True   # Whether to weight FNR by cost ratio
+
+    # Objective weights — severe_fnr has highest weight (safety-critical)
     objective_weights: Dict[str, float] = field(default_factory=lambda: {
-        'ordinal_distance': 1.0,
-        'severe_fnr': 1.5,
-        'macro_f1_complement': 1.0,
-        'complexity': 0.5
+        'ordinal_distance': 0.20,
+        'severe_fnr': 0.50,
+        'macro_f1_complement': 0.20,
+        'complexity': 0.10,
     })
 
     def compute_objectives(
@@ -104,15 +111,13 @@ class ObjectiveCalculator:
                 true_ord = self.label_to_ordinal.get(true_label)
                 pred_ord = self.label_to_ordinal.get(pred_label)
 
-                if true_ord and pred_ord:
-                    dist = self.c_weight * abs(true_ord[0] - pred_ord[0]) + \
-                           self.s_weight * abs(true_ord[1] - pred_ord[1])
+                if true_ord is not None and pred_ord is not None:
+                    dist = self.tier_weight * abs(true_ord - pred_ord)
                     distances.append(dist)
                 else:
-                    # Different labels, max penalty
-                    distances.append(self.c_weight * 3 + self.s_weight * 3)
+                    distances.append(self.tier_weight * 2)  # max distance: T1→T3 = 2
             else:
-                distances.append(self.c_weight * 3 + self.s_weight * 3)
+                distances.append(self.tier_weight * 2)
 
         return float(np.mean(distances)) if distances else 0.0
 
@@ -121,20 +126,39 @@ class ObjectiveCalculator:
         y_true: np.ndarray,
         y_pred: np.ndarray
     ) -> float:
-        """Compute false negative rate for high-risk classes."""
+        """
+        Compute cost-weighted false negative rate for high-risk classes.
+
+        When use_cost_matrix=True, the objective blends:
+          - FNR (missed T3 detections): weighted by severe_fn_cost
+          - Inverse precision (false T3 alarms): weighted by severe_fp_cost
+        This implements asymmetric risk: missing a T3 is far worse than a
+        false alarm.  The combined metric is normalised to [0, 1].
+        """
         if not self.high_risk_indices:
             return 0.0
 
         true_high_risk = np.isin(y_true, self.high_risk_indices)
-        n_true_high_risk = np.sum(true_high_risk)
+        pred_high_risk = np.isin(y_pred, self.high_risk_indices)
+        n_true_hr = np.sum(true_high_risk)
 
-        if n_true_high_risk == 0:
+        if n_true_hr == 0:
             return 0.0
 
-        pred_high_risk = np.isin(y_pred, self.high_risk_indices)
-        false_negatives = np.sum(true_high_risk & ~pred_high_risk)
+        fn = np.sum(true_high_risk & ~pred_high_risk)
+        fp = np.sum(~true_high_risk & pred_high_risk)
+        fnr = fn / n_true_hr
 
-        return false_negatives / n_true_high_risk
+        if not self.use_cost_matrix:
+            return float(fnr)
+
+        # Cost-weighted objective: emphasise FN much more than FP
+        n_non_hr = np.sum(~true_high_risk)
+        fpr = float(fp / n_non_hr) if n_non_hr > 0 else 0.0
+        total_cost = self.severe_fn_cost * fnr + self.severe_fp_cost * fpr
+        # Normalise by maximum possible cost (all FN + all FP)
+        max_cost = self.severe_fn_cost + self.severe_fp_cost
+        return float(total_cost / max_cost)
 
     def _compute_complexity(
         self,
@@ -164,7 +188,7 @@ class ObjectiveCalculator:
         """Compute weighted sum of objectives."""
         weights = np.array([
             self.objective_weights.get('ordinal_distance', 1.0),
-            self.objective_weights.get('severe_fnr', 1.5),
+            self.objective_weights.get('severe_fnr', 2.5),
             self.objective_weights.get('macro_f1_complement', 1.0),
             self.objective_weights.get('complexity', 0.5)
         ])

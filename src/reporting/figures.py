@@ -35,6 +35,26 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Consistent colour palette for all 6 models + ensemble
+MODEL_COLORS: Dict[str, str] = {
+    'CatBoost': '#2196F3',       # blue
+    'LightGBM': '#4CAF50',       # green
+    'XGBoost': '#FF9800',        # orange
+    'FT-Transformer': '#9C27B0', # purple
+    'SpatialGNN': '#F44336',     # red
+    'CORAL': '#00BCD4',          # cyan
+    'Ensemble': '#607D8B',       # blue-grey
+}
+
+
+def _model_color(model_name: str, fallback_idx: int = 0) -> str:
+    """Return the canonical colour for a model, or a fallback from tab10."""
+    if model_name in MODEL_COLORS:
+        return MODEL_COLORS[model_name]
+    # Graceful fallback for unknown model names
+    palette = list(MODEL_COLORS.values())
+    return palette[fallback_idx % len(palette)]
+
 
 @dataclass
 class FigureGenerator:
@@ -192,20 +212,21 @@ class FigureGenerator:
         n_metrics = len(available_metrics)
         n_models = len(results)
 
-        fig, axes = plt.subplots(1, n_metrics, figsize=(4 * n_metrics, 6))
+        # Widen figure for 6 models
+        fig_w = max(4 * n_metrics, n_metrics * max(4, n_models * 0.9))
+        fig, axes = plt.subplots(1, n_metrics, figsize=(fig_w, 6))
         if n_metrics == 1:
             axes = [axes]
 
         models = results['Model'].values if 'Model' in results.columns else results.index.astype(str)
 
-        # Colour: gold for winner, Set2 palette for others
-        base_colors = plt.cm.Set2(np.linspace(0, 1, n_models))
+        # Colour: gold for VIKOR winner, MODEL_COLORS for others
         bar_colors = []
-        for m in models:
+        for i, m in enumerate(models):
             if m == best_model:
                 bar_colors.append('#FFD700')   # gold for VIKOR winner
             else:
-                bar_colors.append(base_colors[list(models).index(m)])
+                bar_colors.append(_model_color(m, fallback_idx=i))
 
         # Metric display names and directionality labels
         metric_labels = {
@@ -270,12 +291,13 @@ class FigureGenerator:
 
         fig, ax = plt.subplots(figsize=(10, 8))
 
-        colors = plt.cm.tab10(np.linspace(0, 1, len(optimization_results)))
+        # Use MODEL_COLORS; fall back to tab10 for unknown names
+        tab10 = plt.cm.tab10(np.linspace(0, 1, max(len(optimization_results), 1)))
         markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p']
 
-        for (model_name, opt_result), color, marker in zip(
-            optimization_results.items(), colors, markers
-        ):
+        for i, (model_name, opt_result) in enumerate(optimization_results.items()):
+            color = MODEL_COLORS.get(model_name, tab10[i % len(tab10)])
+            marker = markers[i % len(markers)]
             # Extract objectives from Pareto front
             if hasattr(opt_result, 'pareto_front'):
                 front = opt_result.pareto_front
@@ -319,15 +341,17 @@ class FigureGenerator:
         if not MATPLOTLIB_AVAILABLE:
             return None
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        n_models = len(comparison_df)
+        fig_h = max(6, n_models * 0.6)
+        fig, axes = plt.subplots(1, 2, figsize=(max(14, n_models * 2), fig_h))
 
-        # Plot 1: Q Score comparison
+        # Plot 1: Q Score comparison (horizontal bars)
         ax1 = axes[0]
         models = comparison_df['Model'].values
         q_scores = comparison_df['Q_Score'].values if 'Q_Score' in comparison_df.columns else np.zeros(len(models))
 
-        colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, len(models)))
-        bars = ax1.barh(range(len(models)), q_scores, color=colors)
+        bar_colors = [_model_color(m, i) for i, m in enumerate(models)]
+        bars = ax1.barh(range(len(models)), q_scores, color=bar_colors, alpha=0.85)
         ax1.set_yticks(range(len(models)))
         ax1.set_yticklabels(models)
         ax1.set_xlabel('VIKOR Q Score (lower is better)')
@@ -337,23 +361,25 @@ class FigureGenerator:
             ax1.text(val + 0.01, bar.get_y() + bar.get_height()/2,
                     f'{val:.3f}', ha='left', va='center', fontsize=10)
 
-        # Plot 2: Objectives radar chart (simplified as bar chart)
+        # Plot 2: Objectives grouped bar chart
         ax2 = axes[1]
         obj_cols = [c for c in comparison_df.columns if c not in ['Model', 'Rank', 'Q_Score', 'n_features', 'In_Compromise_Set']]
 
         if obj_cols:
             x = np.arange(len(obj_cols))
-            width = 0.8 / len(models)
+            width = max(0.1, 0.8 / max(len(models), 1))
 
             for i, (_, row) in enumerate(comparison_df.iterrows()):
                 values = [row[c] for c in obj_cols if c in row]
-                ax2.bar(x + i * width, values, width, label=row['Model'], alpha=0.8)
+                color = _model_color(row['Model'], i)
+                ax2.bar(x + i * width, values, width,
+                        label=row['Model'], alpha=0.85, color=color)
 
             ax2.set_xticks(x + width * (len(models) - 1) / 2)
             ax2.set_xticklabels([c.replace('_', '\n') for c in obj_cols], rotation=0)
             ax2.set_ylabel('Objective Value')
             ax2.set_title('Objective Values by Model')
-            ax2.legend(loc='upper right')
+            ax2.legend(loc='upper right', fontsize=8)
 
         plt.tight_layout()
 
@@ -1103,11 +1129,13 @@ flowchart TB
         D1 --> D2 --> D3
     end
 
-    subgraph Stage_E["Stage E: Model Candidates"]
+    subgraph Stage_E["Stage E: Model Candidates (6)"]
         E1[CatBoost]
         E2[LightGBM]
-        E3[GRU]
-        E4[LSTM]
+        E3[XGBoost]
+        E4[FT-Transformer]
+        E5[SpatialGNN]
+        E6[CORAL]
     end
 
     subgraph Stage_F["Stage F: Optimization"]
@@ -1360,36 +1388,93 @@ flowchart TB
             return []
 
         paths = []
-        scenario_names = list(scenario_results.keys())
+
+        # Sort scenarios: TDS group first (ascending %), then SAR, then others.
+        def _scenario_sort_key(name: str) -> tuple:
+            n = name.upper()
+            if n.startswith('TDS'):
+                return (0, n)
+            if n.startswith('SAR'):
+                return (1, n)
+            if n.startswith('RSC'):
+                return (2, n)
+            return (3, n)
+
+        scenario_names = sorted(scenario_results.keys(), key=_scenario_sort_key)
+
+        # ---- F8a + F8b data -------------------------------------------
+        risk_changes = []
+        escalation_pcts = []   # F8b: safe→T3 escalation (decision-relevant)
+        n_samples_list = []
+
+        for name in scenario_names:
+            result = scenario_results[name]
+            risk_changes.append(float(np.mean(result.high_risk_prob_change)))
+
+            # Safe-to-risky escalation: fraction of non-T3 wells that flip to T3
+            n_total = len(result.baseline_predictions)
+            n_samples_list.append(n_total)
+            if high_risk_indices:
+                baseline_safe = ~np.isin(result.baseline_predictions, high_risk_indices)
+                n_safe = int(baseline_safe.sum())
+                if n_safe > 0:
+                    escalated = baseline_safe & np.isin(result.scenario_predictions, high_risk_indices)
+                    esc_pct = float(escalated.sum() / n_safe * 100)
+                    n_esc = int(escalated.sum())
+                else:
+                    esc_pct, n_esc = 0.0, 0
+            else:
+                esc_pct = float(
+                    np.mean(result.baseline_predictions != result.scenario_predictions) * 100
+                )
+                n_esc = int(np.sum(result.baseline_predictions != result.scenario_predictions))
+            escalation_pcts.append((esc_pct, n_esc, n_safe if high_risk_indices else n_total))
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, max(5, len(scenario_names) * 0.8 + 1.5)))
 
         # ---- F8a: Risk change bar chart --------------------------------
-        risk_changes = []
-        pct_changed = []
-        for name, result in scenario_results.items():
-            risk_changes.append(float(np.mean(result.high_risk_prob_change)))
-            pct_changed.append(
-                float(np.mean(result.baseline_predictions != result.scenario_predictions) * 100)
-            )
-
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
         colors_risk = ['#d62728' if v > 0 else '#2ca02c' for v in risk_changes]
-        axes[0].barh(scenario_names, risk_changes, color=colors_risk, edgecolor='black', linewidth=0.5)
+        bars = axes[0].barh(
+            scenario_names, risk_changes,
+            color=colors_risk, edgecolor='black', linewidth=0.5
+        )
         axes[0].axvline(0, color='black', lw=0.8, linestyle='--')
         axes[0].set_xlabel("Mean Δ High-Risk Probability")
         axes[0].set_title("F8a — High-Risk Probability Change per Scenario")
         axes[0].grid(axis='x', alpha=0.3)
-        for i, v in enumerate(risk_changes):
-            axes[0].text(v + 0.001 * np.sign(v) if v != 0 else 0.001, i,
-                         f"{v:+.4f}", va='center', fontsize=8)
 
-        colors_chg = plt.cm.OrRd(np.array(pct_changed) / (max(pct_changed) + 1e-9))
-        axes[1].barh(scenario_names, pct_changed, color=colors_chg, edgecolor='black', linewidth=0.5)
-        axes[1].set_xlabel("% Samples with Class Change")
-        axes[1].set_title("F8b — Class Change Rate per Scenario")
+        # Add 15% padding on the dominant side so labels don't clip
+        x_lo, x_hi = axes[0].get_xlim()
+        max_abs = max(abs(v) for v in risk_changes) if risk_changes else 1e-4
+        axes[0].set_xlim(
+            min(x_lo, -max_abs * 0.25),
+            max(x_hi, max_abs * 0.25)
+        )
+        for i, v in enumerate(risk_changes):
+            pad = max_abs * 0.08
+            if v >= 0:
+                axes[0].text(v + pad, i, f"+{v:.4f}", va='center', ha='left', fontsize=8)
+            else:
+                axes[0].text(v - pad, i, f"{v:.4f}", va='center', ha='right', fontsize=8)
+
+        # ---- F8b: Safe→T3 escalation bar chart -------------------------
+        esc_values = [e[0] for e in escalation_pcts]
+        esc_counts = [(e[1], e[2]) for e in escalation_pcts]  # (escalated, n_safe)
+        max_esc = max(esc_values) if esc_values else 1e-4
+        colors_esc = plt.cm.OrRd(np.array(esc_values) / (max_esc + 1e-9))
+        axes[1].barh(
+            scenario_names, esc_values,
+            color=colors_esc, edgecolor='black', linewidth=0.5
+        )
+        axes[1].set_xlabel("% Previously-Safe Wells Escalating to T3")
+        axes[1].set_title("F8b — Safe→T3 Escalation Rate per Scenario")
         axes[1].grid(axis='x', alpha=0.3)
-        for i, v in enumerate(pct_changed):
-            axes[1].text(v + 0.1, i, f"{v:.1f}%", va='center', fontsize=8)
+        x_lo1, x_hi1 = axes[1].get_xlim()
+        axes[1].set_xlim(x_lo1, max(x_hi1, max_esc * 1.35))
+        for i, (pct, (n_esc, n_safe)) in enumerate(zip(esc_values, esc_counts)):
+            label = f"{pct:.1f}%  ({n_esc}/{n_safe})"
+            axes[1].text(pct + max_esc * 0.03, i, label,
+                         va='center', ha='left', fontsize=8)
 
         plt.tight_layout()
         p = self.output_dir / "F8a_scenario_risk_change.png"
@@ -1515,4 +1600,555 @@ flowchart TB
         plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
         plt.close()
         logger.info(f"Saved F9 to {output_path}")
+        return output_path
+
+    def f_era5_analysis(
+        self,
+        data: Dict[int, pd.DataFrame],
+        tier_col: str = 'Classification',
+        tier_order: Optional[List[str]] = None,
+    ) -> Path:
+        """
+        ERA5 climate feature analysis figure — 4-panel layout.
+
+        Panel A: Annual precipitation (mm) by year — violin + strip.
+        Panel B: Annual soil moisture (m³/m³) by year — violin + strip.
+        Panel C: ERA5 annual precipitation split by quality tier (test year).
+        Panel D: ERA5 annual soil moisture split by quality tier (test year).
+
+        Requires era5_precip_annual_mm, era5_precip_monsoon_mm,
+        era5_soil_moisture_annual, era5_soil_moisture_pre columns.
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            return None
+
+        era5_precip_col = 'era5_precip_annual_mm'
+        era5_sm_col = 'era5_soil_moisture_annual'
+        era5_mon_col = 'era5_precip_monsoon_mm'
+        era5_pre_col = 'era5_precip_premonsoon_mm'
+        era5_sm_mon = 'era5_soil_moisture_monsoon'
+        era5_sm_pre = 'era5_soil_moisture_pre'
+
+        # Build a flat DataFrame with all years
+        frames = []
+        for yr, df in sorted(data.items()):
+            if df is None or len(df) == 0:
+                continue
+            row = df.copy()
+            row['year'] = str(yr)
+            frames.append(row)
+        if not frames:
+            logger.warning("ERA5 figure: no data available.")
+            return None
+        combined = pd.concat(frames, ignore_index=True)
+
+        # Check at least one ERA5 column is present
+        era5_cols_present = [c for c in [era5_precip_col, era5_sm_col] if c in combined.columns]
+        if not era5_cols_present:
+            logger.warning("ERA5 figure: ERA5 columns not found in data — skipping.")
+            return None
+
+        years = sorted(combined['year'].unique())
+        has_tier = tier_col in combined.columns
+
+        TIER_PALETTE = {
+            'T1_Safe': '#27AE60',
+            'T2_Marginal': '#F39C12',
+            'T3_Restricted': '#E74C3C',
+        }
+        if tier_order is None:
+            tier_order = ['T1_Safe', 'T2_Marginal', 'T3_Restricted']
+
+        # Use the latest year for the tier-breakdown panels
+        latest_year = years[-1]
+        df_latest = combined[combined['year'] == latest_year].copy()
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('ERA5-Land Climate Features — Temporal Trends & Water-Quality Association',
+                     fontsize=13, fontweight='bold', y=1.01)
+
+        year_palette = plt.cm.Blues(np.linspace(0.4, 0.85, len(years)))
+
+        # ---- Panel A: Annual precipitation by year ----
+        ax = axes[0, 0]
+        if era5_precip_col in combined.columns:
+            precip_by_year = [
+                combined.loc[combined['year'] == yr, era5_precip_col].dropna().values
+                for yr in years
+            ]
+            parts = ax.violinplot(precip_by_year, positions=range(len(years)),
+                                  showmedians=True, showextrema=True)
+            for i, (pc, yr_data) in enumerate(zip(parts['bodies'], precip_by_year)):
+                pc.set_facecolor(year_palette[i])
+                pc.set_alpha(0.75)
+                jitter = np.random.RandomState(42).uniform(-0.15, 0.15, len(yr_data))
+                ax.scatter(np.full(len(yr_data), i) + jitter, yr_data,
+                           s=12, alpha=0.5, color=year_palette[i], zorder=3)
+            ax.set_xticks(range(len(years)))
+            ax.set_xticklabels(years)
+            ax.set_ylabel('Annual Precipitation (mm)')
+            ax.set_title('(A) Annual Precipitation by Year')
+            ax.grid(axis='y', alpha=0.3)
+
+            # Add monsoon vs pre-monsoon breakdown as stacked bar inset
+            if era5_mon_col in combined.columns and era5_pre_col in combined.columns:
+                means_mon = [combined.loc[combined['year'] == yr, era5_mon_col].mean() for yr in years]
+                means_pre = [combined.loc[combined['year'] == yr, era5_pre_col].mean() for yr in years]
+                ax2 = ax.inset_axes([0.62, 0.60, 0.36, 0.35])
+                xpos = np.arange(len(years))
+                ax2.bar(xpos, means_mon, color='#1565C0', alpha=0.8, label='Monsoon', width=0.5)
+                ax2.bar(xpos, means_pre, bottom=means_mon, color='#90CAF9', alpha=0.8,
+                        label='Pre-monsoon', width=0.5)
+                ax2.set_xticks(xpos)
+                ax2.set_xticklabels(years, fontsize=6)
+                ax2.set_ylabel('mm', fontsize=6)
+                ax2.tick_params(labelsize=6)
+                ax2.set_title('Seasonal', fontsize=7)
+                ax2.legend(fontsize=5, loc='upper right')
+        else:
+            ax.text(0.5, 0.5, 'ERA5 precipitation\nnot available', transform=ax.transAxes,
+                    ha='center', va='center', fontsize=11, color='grey')
+            ax.set_title('(A) Annual Precipitation by Year')
+
+        # ---- Panel B: Annual soil moisture by year ----
+        ax = axes[0, 1]
+        if era5_sm_col in combined.columns:
+            sm_by_year = [
+                combined.loc[combined['year'] == yr, era5_sm_col].dropna().values
+                for yr in years
+            ]
+            parts = ax.violinplot(sm_by_year, positions=range(len(years)),
+                                  showmedians=True, showextrema=True)
+            for i, (pc, yr_data) in enumerate(zip(parts['bodies'], sm_by_year)):
+                pc.set_facecolor(year_palette[i])
+                pc.set_alpha(0.75)
+                jitter = np.random.RandomState(43).uniform(-0.15, 0.15, len(yr_data))
+                ax.scatter(np.full(len(yr_data), i) + jitter, yr_data,
+                           s=12, alpha=0.5, color=year_palette[i], zorder=3)
+            ax.set_xticks(range(len(years)))
+            ax.set_xticklabels(years)
+            ax.set_ylabel('Soil Moisture (m³/m³)')
+            ax.set_title('(B) Annual Soil Moisture by Year')
+            ax.grid(axis='y', alpha=0.3)
+        else:
+            ax.text(0.5, 0.5, 'ERA5 soil moisture\nnot available', transform=ax.transAxes,
+                    ha='center', va='center', fontsize=11, color='grey')
+            ax.set_title('(B) Annual Soil Moisture by Year')
+
+        # ---- Panel C: Precipitation by quality tier (latest year) ----
+        ax = axes[1, 0]
+        if era5_precip_col in df_latest.columns and has_tier:
+            tier_vals = {
+                t: df_latest.loc[df_latest[tier_col] == t, era5_precip_col].dropna().values
+                for t in tier_order if t in df_latest[tier_col].values
+            }
+            tiers_present = [t for t in tier_order if t in tier_vals and len(tier_vals[t]) > 0]
+            if tiers_present:
+                positions = range(len(tiers_present))
+                parts = ax.violinplot(
+                    [tier_vals[t] for t in tiers_present],
+                    positions=positions, showmedians=True, showextrema=True
+                )
+                for pc, t in zip(parts['bodies'], tiers_present):
+                    pc.set_facecolor(TIER_PALETTE.get(t, '#888'))
+                    pc.set_alpha(0.75)
+                for i, t in enumerate(tiers_present):
+                    jitter = np.random.RandomState(44 + i).uniform(-0.12, 0.12, len(tier_vals[t]))
+                    ax.scatter(np.full(len(tier_vals[t]), i) + jitter, tier_vals[t],
+                               s=12, alpha=0.55, color=TIER_PALETTE.get(t, '#888'), zorder=3)
+                # Annotate medians
+                for i, t in enumerate(tiers_present):
+                    med = float(np.median(tier_vals[t]))
+                    ax.text(i, med, f'{med:.0f}', ha='center', va='bottom', fontsize=7,
+                            fontweight='bold', color=TIER_PALETTE.get(t, '#333'))
+                short_labels = [t.replace('T1_', 'T1\n').replace('T2_', 'T2\n').replace('T3_', 'T3\n')
+                                for t in tiers_present]
+                ax.set_xticks(positions)
+                ax.set_xticklabels(short_labels, fontsize=9)
+            ax.set_ylabel('Annual Precipitation (mm)')
+            ax.set_title(f'(C) Precipitation by Quality Tier ({latest_year})')
+            ax.grid(axis='y', alpha=0.3)
+        else:
+            ax.text(0.5, 0.5, f'No tier data\nfor {latest_year}', transform=ax.transAxes,
+                    ha='center', va='center', fontsize=11, color='grey')
+            ax.set_title('(C) Precipitation by Quality Tier')
+
+        # ---- Panel D: Soil moisture by quality tier (latest year) ----
+        ax = axes[1, 1]
+        if era5_sm_col in df_latest.columns and has_tier:
+            tier_vals_sm = {
+                t: df_latest.loc[df_latest[tier_col] == t, era5_sm_col].dropna().values
+                for t in tier_order if t in df_latest[tier_col].values
+            }
+            tiers_present_sm = [t for t in tier_order if t in tier_vals_sm and len(tier_vals_sm[t]) > 0]
+            if tiers_present_sm:
+                positions = range(len(tiers_present_sm))
+                parts = ax.violinplot(
+                    [tier_vals_sm[t] for t in tiers_present_sm],
+                    positions=positions, showmedians=True, showextrema=True
+                )
+                for pc, t in zip(parts['bodies'], tiers_present_sm):
+                    pc.set_facecolor(TIER_PALETTE.get(t, '#888'))
+                    pc.set_alpha(0.75)
+                for i, t in enumerate(tiers_present_sm):
+                    jitter = np.random.RandomState(47 + i).uniform(-0.12, 0.12, len(tier_vals_sm[t]))
+                    ax.scatter(np.full(len(tier_vals_sm[t]), i) + jitter, tier_vals_sm[t],
+                               s=12, alpha=0.55, color=TIER_PALETTE.get(t, '#888'), zorder=3)
+                for i, t in enumerate(tiers_present_sm):
+                    med = float(np.median(tier_vals_sm[t]))
+                    ax.text(i, med, f'{med:.3f}', ha='center', va='bottom', fontsize=7,
+                            fontweight='bold', color=TIER_PALETTE.get(t, '#333'))
+                short_labels = [t.replace('T1_', 'T1\n').replace('T2_', 'T2\n').replace('T3_', 'T3\n')
+                                for t in tiers_present_sm]
+                ax.set_xticks(positions)
+                ax.set_xticklabels(short_labels, fontsize=9)
+            ax.set_ylabel('Soil Moisture (m³/m³)')
+            ax.set_title(f'(D) Soil Moisture by Quality Tier ({latest_year})')
+            ax.grid(axis='y', alpha=0.3)
+        else:
+            ax.text(0.5, 0.5, f'No tier data\nfor {latest_year}', transform=ax.transAxes,
+                    ha='center', va='center', fontsize=11, color='grey')
+            ax.set_title('(D) Soil Moisture by Quality Tier')
+
+        # Add a shared legend for tiers
+        handles = [mpatches.Patch(color=TIER_PALETTE.get(t, '#888'),
+                                  label=t.replace('_', ' ')) for t in tier_order]
+        fig.legend(handles=handles, loc='lower center', ncol=len(tier_order),
+                   fontsize=9, frameon=True, bbox_to_anchor=(0.5, -0.02))
+
+        plt.tight_layout()
+        output_path = self.output_dir / "F_era5_climate_analysis.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Saved ERA5 figure to {output_path}")
+        return output_path
+
+    def f_era5_shap_spatial(
+        self,
+        nc_path: str,
+        data: Dict[int, "pd.DataFrame"],
+        shap_result: Any,
+        feature_names: List[str],
+        X_test: "np.ndarray",
+        y_test: "np.ndarray",
+        idx_to_label: Dict[int, str],
+        source_year: int = 2019,
+        importance_df: Optional["pd.DataFrame"] = None,
+    ) -> Path:
+        """
+        Four-panel ERA5 + SHAP spatial figure.
+
+        Panel A: ERA5 annual precipitation raster (pcolormesh) + well quality tier overlay.
+        Panel B: ERA5 annual soil moisture raster + well quality tier overlay.
+        Panel C: Mean |SHAP| bar chart for ERA5 features (from shap_result or importance_df).
+        Panel D: SHAP dependence scatter when shap_result available; otherwise ERA5 feature
+                 value distribution by quality tier (violin + strip) from the well data.
+
+        Parameters
+        ----------
+        importance_df : optional pd.DataFrame with columns ['Feature','Importance'] or
+                        ['feature','importance'] — used as Panel C fallback when shap_result
+                        is None (e.g. ensemble best model where per-sample SHAP is unavailable).
+        """
+        import matplotlib.gridspec as gridspec
+
+        TIER_PALETTE = {
+            'T1_Safe':       '#27AE60',
+            'T2_Marginal':   '#F39C12',
+            'T3_Restricted': '#E74C3C',
+        }
+        tier_order = ['T1_Safe', 'T2_Marginal', 'T3_Restricted']
+
+        # ── 1. Load ERA5 raster from netCDF ──────────────────────────────────
+        raster_ok = False
+        precip_raster = sm_raster = LON = LAT = None
+        try:
+            import netCDF4 as nc4
+            ds = nc4.Dataset(nc_path, 'r')
+            lats_raw = np.asarray(ds.variables['latitude'][:], dtype=float)
+            lons_raw = np.asarray(ds.variables['longitude'][:], dtype=float)
+            time_var = ds.variables['valid_time']
+            try:
+                import cftime
+                times = nc4.num2date(time_var[:], units=time_var.units,
+                                     calendar=getattr(time_var, 'calendar', 'standard'))
+                year_arr = np.array([t.year for t in times], dtype=int)
+            except Exception:
+                # Fallback: assume uniform daily steps Jan 2018 – Dec 2020 (1095 days)
+                n = len(time_var[:])
+                import datetime as _dt
+                base = _dt.date(2018, 1, 1)
+                year_arr = np.array([(base + _dt.timedelta(days=i)).year for i in range(n)], dtype=int)
+
+            year_mask = year_arr == source_year
+            tp_raw  = np.asarray(ds.variables['tp'][year_mask], dtype=float)   # (n_days, lat, lon) m/day
+            sm_raw  = np.asarray(ds.variables['swvl1'][year_mask], dtype=float) # (n_days, lat, lon) m³/m³
+            ds.close()
+
+            # Sort lats ascending (south → north) so pcolormesh puts south at bottom
+            if lats_raw[0] > lats_raw[-1]:
+                order = np.argsort(lats_raw)
+                lats_raw = lats_raw[order]
+                tp_raw  = tp_raw[:, order, :]
+                sm_raw  = sm_raw[:, order, :]
+
+            import warnings as _w
+            with _w.catch_warnings():
+                _w.simplefilter('ignore', RuntimeWarning)
+                precip_raster = np.nanmean(tp_raw, axis=0) * 1000 * 365   # mm/yr
+                sm_raster     = np.nanmean(sm_raw, axis=0)                 # m³/m³
+
+            LON, LAT = np.meshgrid(lons_raw, lats_raw)
+            raster_ok = True
+        except Exception as exc:
+            logger.warning(f"ERA5 raster load failed: {exc}")
+
+        # ── 2. Well data for source_year ──────────────────────────────────────
+        wells_df = data.get(source_year, pd.DataFrame())
+        has_wells = (
+            len(wells_df) > 0
+            and 'lat_gis' in wells_df.columns
+            and 'long_gis' in wells_df.columns
+        )
+        tier_col_name = 'Classification' if 'Classification' in (wells_df.columns if has_wells else []) else None
+
+        # ── 3. SHAP analysis for ERA5 features ────────────────────────────────
+        era5_feat_names = [f for f in feature_names if 'era5' in f.lower()]
+        era5_feat_idx   = [feature_names.index(f) for f in era5_feat_names if f in feature_names]
+
+        shap_ok = (shap_result is not None and hasattr(shap_result, 'shap_values')
+                   and len(era5_feat_idx) > 0)
+
+        # Normalise importance_df column names to lowercase
+        _imp_df: Optional[pd.DataFrame] = None
+        if importance_df is not None and len(importance_df) > 0:
+            _imp_df = importance_df.copy()
+            _imp_df.columns = [c.lower() for c in _imp_df.columns]
+            if 'feature' not in _imp_df.columns or 'importance' not in _imp_df.columns:
+                _imp_df = None
+
+        sv2d = sv_t3 = None
+        era5_imp = pd.DataFrame()
+        if shap_ok:
+            sv = shap_result.shap_values   # (n, n_feat) or (n, n_feat, n_classes)
+            if sv.ndim == 3:
+                sv2d  = np.mean(np.abs(sv), axis=2)          # mean-abs across classes
+                t3_cls = max(idx_to_label.keys())
+                sv_t3  = sv[:, :, t3_cls]                    # T3 class only
+            else:
+                sv2d  = np.abs(sv)
+                sv_t3 = sv
+
+            # Build ERA5 importance table from global_importance or sv2d
+            gi = shap_result.global_importance
+            era5_mask = gi['feature'].str.contains('era5', case=False, na=False)
+            era5_imp = gi[era5_mask].copy()
+            if len(era5_imp) == 0:
+                era5_imp = pd.DataFrame({
+                    'feature':    era5_feat_names,
+                    'importance': [float(sv2d[:, i].mean()) for i in era5_feat_idx],
+                })
+        elif _imp_df is not None:
+            # Full shap_result not available (e.g. ensemble winner) but importance CSV loaded
+            era5_mask = _imp_df['feature'].str.contains('era5', case=False, na=False)
+            era5_imp = _imp_df[era5_mask][['feature', 'importance']].copy()
+
+        # ── 4. Figure layout ──────────────────────────────────────────────────
+        fig = plt.figure(figsize=(14, 11))
+        gs  = gridspec.GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.38)
+        ax_prec = fig.add_subplot(gs[0, 0])
+        ax_sm   = fig.add_subplot(gs[0, 1])
+        ax_bar  = fig.add_subplot(gs[1, 0])
+        ax_dep  = fig.add_subplot(gs[1, 1])
+
+        # helper: scatter wells on an axis
+        def _plot_wells(ax):
+            if not has_wells:
+                return
+            for tier in tier_order:
+                sub = wells_df[wells_df[tier_col_name] == tier] if tier_col_name else wells_df
+                if len(sub) == 0:
+                    continue
+                ax.scatter(sub['long_gis'], sub['lat_gis'],
+                           c=TIER_PALETTE[tier], s=32, alpha=0.88,
+                           edgecolors='white', linewidths=0.45, zorder=3,
+                           label=tier.replace('_', ' '))
+
+        # ── Panel A: Precipitation raster ─────────────────────────────────────
+        if raster_ok:
+            pcm_p = ax_prec.pcolormesh(LON, LAT, precip_raster,
+                                       cmap='Blues', shading='auto')
+            cb_p = plt.colorbar(pcm_p, ax=ax_prec, shrink=0.82, pad=0.02)
+            cb_p.set_label('mm / yr', fontsize=8)
+        else:
+            ax_prec.set_facecolor('#ddeeff')
+            ax_prec.text(0.5, 0.5, 'ERA5 raster\nnot available',
+                         transform=ax_prec.transAxes, ha='center', va='center',
+                         fontsize=10, color='grey')
+        _plot_wells(ax_prec)
+        ax_prec.set_xlabel('Longitude (°E)', fontsize=9)
+        ax_prec.set_ylabel('Latitude (°N)', fontsize=9)
+        ax_prec.set_title(f'(A) Annual Precipitation – {source_year}\n'
+                          'ERA5-Land raster  ·  Well quality overlay', fontsize=9)
+        ax_prec.tick_params(labelsize=8)
+
+        # ── Panel B: Soil moisture raster ─────────────────────────────────────
+        if raster_ok:
+            pcm_s = ax_sm.pcolormesh(LON, LAT, sm_raster,
+                                     cmap='YlGnBu', shading='auto')
+            cb_s = plt.colorbar(pcm_s, ax=ax_sm, shrink=0.82, pad=0.02)
+            cb_s.set_label('m³ / m³', fontsize=8)
+        else:
+            ax_sm.set_facecolor('#eeffee')
+            ax_sm.text(0.5, 0.5, 'ERA5 raster\nnot available',
+                       transform=ax_sm.transAxes, ha='center', va='center',
+                       fontsize=10, color='grey')
+        _plot_wells(ax_sm)
+        ax_sm.set_xlabel('Longitude (°E)', fontsize=9)
+        ax_sm.set_ylabel('Latitude (°N)', fontsize=9)
+        ax_sm.set_title(f'(B) Annual Soil Moisture – {source_year}\n'
+                        'ERA5-Land raster  ·  Well quality overlay', fontsize=9)
+        ax_sm.tick_params(labelsize=8)
+
+        # ── Panel C: ERA5 SHAP importance bar ─────────────────────────────────
+        def _friendly(name: str) -> str:
+            return (name.replace('era5_', '')
+                        .replace('_annual_mm', ' (ann. mm)')
+                        .replace('_monsoon_mm', ' (monsoon mm)')
+                        .replace('_premonsoon_mm', ' (pre-mns. mm)')
+                        .replace('_annual', ' (annual)')
+                        .replace('_monsoon', ' (monsoon)')
+                        .replace('_pre', ' (pre-mns.)'))
+
+        if len(era5_imp) > 0:
+            era5_sorted = era5_imp.sort_values('importance', ascending=True)
+            labels = [_friendly(f) for f in era5_sorted['feature'].tolist()]
+            vals   = era5_sorted['importance'].values
+
+            cmap_b = plt.get_cmap('viridis', len(vals))
+            bar_colors = [cmap_b(i / max(1, len(vals) - 1)) for i in range(len(vals))]
+
+            bars = ax_bar.barh(range(len(vals)), vals, color=bar_colors,
+                               edgecolor='white', linewidth=0.5)
+            ax_bar.set_yticks(range(len(vals)))
+            ax_bar.set_yticklabels(labels, fontsize=8)
+            _c_xlabel = 'Mean |SHAP value|' if shap_ok else 'Feature Importance'
+            _c_title  = ('(C) ERA5 Feature Importance\n(SHAP – mean |value|)' if shap_ok
+                         else '(C) ERA5 Feature Importance\n(model feature importance)')
+            ax_bar.set_xlabel(_c_xlabel, fontsize=9)
+            ax_bar.set_title(_c_title, fontsize=9)
+            ax_bar.grid(axis='x', alpha=0.3)
+            max_val = vals.max() if vals.max() > 0 else 1.0
+            for bar, v in zip(bars, vals):
+                ax_bar.text(v + max_val * 0.015,
+                            bar.get_y() + bar.get_height() / 2,
+                            f'{v:.4f}', va='center', fontsize=7)
+        else:
+            ax_bar.text(0.5, 0.5, 'SHAP not\navailable',
+                        transform=ax_bar.transAxes, ha='center', va='center',
+                        fontsize=11, color='grey')
+            ax_bar.set_title('(C) ERA5 Feature Importance', fontsize=9)
+
+        # ── Panel D: SHAP dependence (top ERA5 feature → T3 class) ───────────
+        if shap_ok and len(era5_imp) > 0 and X_test is not None:
+            top_feat = era5_imp.sort_values('importance', ascending=False).iloc[0]['feature']
+            if top_feat in feature_names:
+                fidx   = feature_names.index(top_feat)
+                x_vals = X_test[:, fidx]
+                y_vals = sv_t3[:, fidx]
+
+                for cls_idx, label in sorted(idx_to_label.items()):
+                    mask = y_test == cls_idx
+                    if mask.sum() == 0:
+                        continue
+                    ax_dep.scatter(x_vals[mask], y_vals[mask],
+                                   c=TIER_PALETTE.get(label, '#888'),
+                                   s=26, alpha=0.78,
+                                   edgecolors='white', linewidths=0.35,
+                                   label=label.replace('_', ' '), zorder=3)
+
+                ax_dep.axhline(0, color='black', linewidth=0.8, linestyle='--', alpha=0.45)
+
+                # Quadratic trend
+                try:
+                    z = np.polyfit(x_vals, y_vals, 2)
+                    x_line = np.linspace(x_vals.min(), x_vals.max(), 120)
+                    ax_dep.plot(x_line, np.polyval(z, x_line),
+                                'k-', linewidth=1.6, alpha=0.55, label='Trend', zorder=4)
+                except Exception:
+                    pass
+
+                ax_dep.set_xlabel(f'{_friendly(top_feat)} (standardised)', fontsize=9)
+                ax_dep.set_ylabel('SHAP value → T3_Restricted', fontsize=9)
+                ax_dep.set_title(f'(D) SHAP Dependence: {_friendly(top_feat)}\n'
+                                 'Contribution to T3_Restricted prediction', fontsize=9)
+                ax_dep.legend(fontsize=8, loc='best', framealpha=0.85)
+                ax_dep.grid(alpha=0.3)
+        else:
+            # Fallback: violin + strip of top ERA5 feature value by quality tier
+            # (from the source-year well data which has ERA5 columns merged in)
+            _top_era5 = (era5_imp.sort_values('importance', ascending=False).iloc[0]['feature']
+                         if len(era5_imp) > 0 else (era5_feat_names[0] if era5_feat_names else None))
+            _dep_drawn = False
+            if _top_era5 and has_wells and _top_era5 in wells_df.columns:
+                _plot_df = wells_df[['Classification', _top_era5]].dropna()
+                if len(_plot_df) > 5:
+                    _tiers_present = [t for t in tier_order if t in _plot_df['Classification'].values]
+                    positions = list(range(len(_tiers_present)))
+                    for pos, tier in zip(positions, _tiers_present):
+                        vals_t = _plot_df.loc[_plot_df['Classification'] == tier, _top_era5].values
+                        # Violin body
+                        if len(vals_t) >= 3:
+                            try:
+                                vp = ax_dep.violinplot([vals_t], positions=[pos],
+                                                       widths=0.5, showmedians=True,
+                                                       showextrema=True)
+                                for pc in vp['bodies']:
+                                    pc.set_facecolor(TIER_PALETTE[tier])
+                                    pc.set_alpha(0.55)
+                                for part in ['cmedians', 'cmins', 'cmaxes', 'cbars']:
+                                    if part in vp:
+                                        vp[part].set_color(TIER_PALETTE[tier])
+                                        vp[part].set_linewidth(1.5)
+                            except Exception:
+                                pass
+                        # Strip
+                        jitter = np.random.default_rng(42).uniform(-0.1, 0.1, len(vals_t))
+                        ax_dep.scatter(np.full(len(vals_t), pos) + jitter, vals_t,
+                                       c=TIER_PALETTE[tier], s=18, alpha=0.60,
+                                       edgecolors='white', linewidths=0.3, zorder=3)
+                    short = [t.replace('T1_', 'T1\n').replace('T2_', 'T2\n').replace('T3_', 'T3\n')
+                             for t in _tiers_present]
+                    ax_dep.set_xticks(positions)
+                    ax_dep.set_xticklabels(short, fontsize=9)
+                    ax_dep.set_ylabel(_friendly(_top_era5), fontsize=9)
+                    ax_dep.set_title(f'(D) {_friendly(_top_era5)} by Quality Tier\n'
+                                     f'({source_year} wells — ERA5 merged values)', fontsize=9)
+                    ax_dep.grid(axis='y', alpha=0.3)
+                    _dep_drawn = True
+            if not _dep_drawn:
+                ax_dep.text(0.5, 0.5, 'SHAP not\navailable',
+                            transform=ax_dep.transAxes, ha='center', va='center',
+                            fontsize=11, color='grey')
+                ax_dep.set_title('(D) SHAP Dependence (top ERA5 feature)', fontsize=9)
+
+        # ── Shared tier legend ────────────────────────────────────────────────
+        legend_handles = [
+            mpatches.Patch(color=TIER_PALETTE[t], label=t.replace('_', ' '))
+            for t in tier_order
+        ]
+        fig.legend(handles=legend_handles, loc='lower center', ncol=3,
+                   fontsize=9, frameon=True, bbox_to_anchor=(0.5, -0.01),
+                   title='Well Quality Tier', title_fontsize=9)
+
+        fig.suptitle(
+            f'ERA5-Land Climate Context and SHAP Attribution ({source_year})\n'
+            'Spatial Groundwater Quality Distribution + Climate Feature Contributions',
+            fontsize=11, fontweight='bold', y=1.02
+        )
+
+        output_path = self.output_dir / "F_era5_shap_spatial.png"
+        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Saved ERA5+SHAP spatial figure to {output_path}")
         return output_path

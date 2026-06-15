@@ -54,6 +54,79 @@ except ImportError:
 
 if TORCH_AVAILABLE:
 
+    class _TransformerRAEModel(nn.Module):
+        """
+        Transformer-based encoder-decoder for short multivariate temporal sequences.
+
+        Replaces the GRU with multi-head self-attention, which better captures
+        non-linear stoichiometric relationships between co-occurring ionic features
+        (e.g. charge balance: anion sum ≈ cation sum).
+
+        Architecture
+        ------------
+        Encoder : PositionalEncoding → TransformerEncoder(d_model, nhead, n_layers)
+                  → mean-pool → Linear(d_model → latent)
+        Decoder : Linear(latent → d_model) → repeat seq_len
+                  → TransformerDecoder → Linear(d_model → n_features)
+        """
+
+        def __init__(
+            self,
+            n_features: int,
+            hidden_size: int,
+            latent_size: int,
+            n_layers: int,
+            dropout: float,
+            n_heads: int = 4,
+        ):
+            super().__init__()
+            self.n_features = n_features
+            self.hidden_size = hidden_size
+            self.latent_size = latent_size
+            self.n_layers = n_layers
+
+            # Feature projection to d_model
+            self.input_proj = nn.Linear(n_features, hidden_size)
+            self.output_proj = nn.Linear(hidden_size, n_features)
+
+            # Encoder: multi-head self-attention over the sequence
+            enc_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_size, nhead=min(n_heads, hidden_size // 8),
+                dim_feedforward=hidden_size * 2, dropout=dropout,
+                batch_first=True
+            )
+            self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+            self.encoder_fc = nn.Sequential(
+                nn.Linear(hidden_size, latent_size), nn.Tanh()
+            )
+
+            # Decoder
+            dec_layer = nn.TransformerDecoderLayer(
+                d_model=hidden_size, nhead=min(n_heads, hidden_size // 8),
+                dim_feedforward=hidden_size * 2, dropout=dropout,
+                batch_first=True
+            )
+            self.decoder = nn.TransformerDecoder(dec_layer, num_layers=n_layers)
+            self.decoder_fc = nn.Linear(latent_size, hidden_size)
+
+        def encode(self, x: "torch.Tensor") -> "torch.Tensor":
+            """(batch, seq_len, n_features) → (batch, latent_size)."""
+            h = self.input_proj(x)              # (B, T, H)
+            h = self.encoder(h)                  # (B, T, H)
+            z = h.mean(dim=1)                    # (B, H) — mean pooling
+            return self.encoder_fc(z)            # (B, latent)
+
+        def decode(self, z: "torch.Tensor", seq_len: int) -> "torch.Tensor":
+            """(batch, latent) → (batch, seq_len, n_features)."""
+            memory = self.decoder_fc(z).unsqueeze(1).expand(-1, seq_len, -1)  # (B, T, H)
+            tgt = memory                         # use same as query and memory
+            out = self.decoder(tgt, memory)      # (B, T, H)
+            return self.output_proj(out)         # (B, T, n_features)
+
+        def forward(self, x: "torch.Tensor"):
+            z = self.encode(x)
+            return self.decode(z, x.shape[1]), z
+
     class _RAEModel(nn.Module):
         """
         GRU-based encoder-decoder for short multivariate temporal sequences.
@@ -192,6 +265,8 @@ class RAEImputer:
         patience: int = 30,
         random_state: int = 42,
         device: Optional[str] = None,
+        architecture: str = 'transformer',  # 'gru' or 'transformer'
+        n_heads: int = 4,                   # Transformer attention heads
     ):
         self.hidden_size = hidden_size
         self.latent_size = latent_size
@@ -202,6 +277,8 @@ class RAEImputer:
         self.batch_size = batch_size
         self.patience = patience
         self.random_state = random_state
+        self.architecture = architecture
+        self.n_heads = n_heads
 
         self._model = None
         self._feature_cols: Optional[List[str]] = None
@@ -283,7 +360,7 @@ class RAEImputer:
         self._feature_stds = stds
 
         logger.info(
-            f"Fitting RAE on years {train_years} | "
+            f"Fitting RAE ({self.architecture}) on years {train_years} | "
             f"{len(feature_cols)} features | device={self.device}"
         )
 
@@ -310,16 +387,39 @@ class RAEImputer:
         torch.manual_seed(self.random_state)
         np.random.seed(self.random_state)
 
-        n_features = len(feature_cols)
+        n_features_val = len(feature_cols)
         seq_len = sequences.shape[1]
 
-        self._model = _RAEModel(
-            n_features=n_features,
-            hidden_size=self.hidden_size,
-            latent_size=self.latent_size,
-            n_layers=self.n_layers,
-            dropout=self.dropout,
-        ).to(self.device)
+        try:
+            if self.architecture == 'transformer':
+                self._model = _TransformerRAEModel(
+                    n_features=n_features_val,
+                    hidden_size=self.hidden_size,
+                    latent_size=self.latent_size,
+                    n_layers=self.n_layers,
+                    dropout=self.dropout,
+                    n_heads=self.n_heads,
+                ).to(self.device)
+            else:
+                self._model = _RAEModel(
+                    n_features=n_features_val,
+                    hidden_size=self.hidden_size,
+                    latent_size=self.latent_size,
+                    n_layers=self.n_layers,
+                    dropout=self.dropout,
+                ).to(self.device)
+        except Exception as model_err:
+            logger.warning(
+                f"Failed to build {self.architecture} model ({model_err}); "
+                "falling back to GRU."
+            )
+            self._model = _RAEModel(
+                n_features=n_features_val,
+                hidden_size=self.hidden_size,
+                latent_size=self.latent_size,
+                n_layers=self.n_layers,
+                dropout=self.dropout,
+            ).to(self.device)
 
         self._train_model(seq_norm, masks, seq_len)
         self._is_fitted = True

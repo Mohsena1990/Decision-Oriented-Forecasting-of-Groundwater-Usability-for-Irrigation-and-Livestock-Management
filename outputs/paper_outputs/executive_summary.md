@@ -6,11 +6,11 @@ This research implements a decision-ready spatio-temporal forecasting framework 
 
 ## Model Performance
 
-- **Best Model**: CatBoost
+- **Best Model**: SpatialGNN
 
-- **Macro F1**: 0.547
+- **Macro F1**: 0.554
 
-- **Severe FNR**: 0.596
+- **Severe FNR**: 0.579
 
 - **Ordinal Distance**: N/A
 
@@ -20,26 +20,24 @@ This research implements a decision-ready spatio-temporal forecasting framework 
 
 Based on the analysis, the following parameters should be prioritized for monitoring:
 
-- **NO3**: High influence on water quality classification
+- **EC_C3**: High influence on water quality classification
 
 - **EC**: High influence on water quality classification
 
-- **SAR**: High influence on water quality classification
+- **EC_C2**: High influence on water quality classification
 
-- **HCO3**: High influence on water quality classification
+- **EC_C4**: High influence on water quality classification
 
-- **Cl**: High influence on water quality classification
+- **K**: High influence on water quality classification
 
 
 ## Risk Mitigation Scenarios
 
 Scenarios with highest impact on water quality risk:
 
-- TDS_+10%
+- SAR_+10%
 
-- TDS_+20%
-
-- TDS_+30%
+- SAR_+20%
 
 
 ## General Recommendations

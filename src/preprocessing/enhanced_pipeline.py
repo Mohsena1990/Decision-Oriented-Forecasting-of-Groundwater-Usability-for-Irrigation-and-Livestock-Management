@@ -46,6 +46,16 @@ HIGH_OUTLIER_FEATURES = ['CO3', 'SO4', 'K', 'NO3', 'SAR', 'Na']
 # Most discriminative features (ANOVA F > 100)
 TOP_DISCRIMINATIVE_FEATURES = ['EC', 'Na', 'SAR', 'Cl', 'Mg', 'HCO3', 'Ca', 'NO3']
 
+# External enrichment features — excluded from power transform (already near-normal)
+# but included in robust scaling and winsorization.
+ERA5_FEATURES = [
+    'era5_precip_annual_mm', 'era5_precip_monsoon_mm', 'era5_precip_premonsoon_mm',
+    'era5_soil_moisture_annual', 'era5_soil_moisture_monsoon', 'era5_soil_moisture_pre',
+]
+# NDVI_FEATURES = ['ndvi_oct_nov_mean', 'ndvi_oct_nov_max']  # GEE disabled
+NDVI_FEATURES: list = []
+EXTERNAL_FEATURES = ERA5_FEATURES  # ERA5 only (NDVI disabled)
+
 # High-risk tiers (T3_Restricted + T4_Unsafe) — imported from canonical definition
 from src.objectives.definitions import HIGH_RISK_CLASSES  # noqa: E402
 
@@ -93,9 +103,13 @@ class EnhancedPreprocessingPipeline:
 
     config: EnhancedPreprocessingConfig = field(default_factory=EnhancedPreprocessingConfig)
 
-    # Feature definitions
+    # Feature definitions (base hydrochemical + external enrichment)
     numeric_features: List[str] = field(default_factory=lambda: [
-        'pH', 'EC', 'CO3', 'HCO3', 'Cl', 'F', 'NO3', 'SO4', 'Na', 'K', 'Ca', 'Mg', 'TH', 'SAR', 'RSC'
+        'pH', 'EC', 'CO3', 'HCO3', 'Cl', 'F', 'NO3', 'SO4', 'Na', 'K', 'Ca', 'Mg', 'TH', 'SAR', 'RSC',
+        # ERA5 climate features (present only if external data was downloaded)
+        'era5_precip_annual_mm', 'era5_precip_monsoon_mm', 'era5_precip_premonsoon_mm',
+        'era5_soil_moisture_annual', 'era5_soil_moisture_monsoon', 'era5_soil_moisture_pre',
+        # 'ndvi_oct_nov_mean', 'ndvi_oct_nov_max',  # GEE disabled
     ])
     categorical_features: List[str] = field(default_factory=lambda: ['district', 'mandal', 'village'])
     spatial_features: List[str] = field(default_factory=lambda: ['lat_gis', 'long_gis'])
@@ -300,9 +314,13 @@ class EnhancedPreprocessingPipeline:
         logger.info(f"Computed statistics for {len(self._numeric_stats)} numeric features")
 
     def _fit_power_transformer(self, df: pd.DataFrame):
-        """Fit power transformer for skewed features."""
+        """Fit power transformer for skewed hydrochemical features.
+        External features (ERA5, NDVI) are excluded — they have near-normal
+        distributions and don't benefit from power transformation."""
         skewed_cols = [c for c in HIGHLY_SKEWED_FEATURES
-                      if c in self.numeric_features and c in df.columns]
+                      if c in self.numeric_features
+                      and c in df.columns
+                      and c not in EXTERNAL_FEATURES]
 
         if not skewed_cols:
             return
@@ -544,8 +562,9 @@ class EnhancedPreprocessingPipeline:
         """Create key interaction features based on domain knowledge."""
         interactions = []
         interaction_names = []
+        epsilon = 1e-6
 
-        # Key interactions based on water quality science
+        # Existing ratio pairs
         interaction_pairs = [
             ('EC', 'SAR'),      # Salinity-sodium interaction
             ('Na', 'Ca'),       # Sodium-calcium balance
@@ -558,22 +577,78 @@ class EnhancedPreprocessingPipeline:
             if feat1 in feature_names and feat2 in feature_names:
                 idx1 = feature_names.index(feat1)
                 idx2 = feature_names.index(feat2)
-
-                # Ratio feature (with epsilon to avoid division by zero)
-                epsilon = 1e-6
                 ratio = X_numeric[:, idx1] / (X_numeric[:, idx2] + epsilon)
                 interactions.append(ratio.reshape(-1, 1))
                 interaction_names.append(f'{feat1}_div_{feat2}')
 
-        # Add SAR-based features if EC and SAR available
+        # EC * SAR product (salinity × sodium hazard)
         if 'EC' in feature_names and 'SAR' in feature_names:
             ec_idx = feature_names.index('EC')
             sar_idx = feature_names.index('SAR')
-
-            # EC * SAR interaction (higher = more problematic)
             ec_sar_product = X_numeric[:, ec_idx] * X_numeric[:, sar_idx]
             interactions.append(ec_sar_product.reshape(-1, 1))
             interaction_names.append('EC_x_SAR')
+
+        # Kelly Index: Na / (Ca + Mg) — USDA irrigation suitability index
+        # >1 means sodium-dominated water, harmful to soil structure
+        if all(f in feature_names for f in ['Na', 'Ca', 'Mg']):
+            na_idx = feature_names.index('Na')
+            ca_idx = feature_names.index('Ca')
+            mg_idx = feature_names.index('Mg')
+            kelly = X_numeric[:, na_idx] / (
+                X_numeric[:, ca_idx] + X_numeric[:, mg_idx] + epsilon
+            )
+            interactions.append(kelly.reshape(-1, 1))
+            interaction_names.append('Kelly_Index')
+
+            # Magnesium Hazard Index: Mg / (Ca + Mg) — >50% indicates Mg dominance
+            mhi = X_numeric[:, mg_idx] / (
+                X_numeric[:, ca_idx] + X_numeric[:, mg_idx] + epsilon
+            )
+            interactions.append(mhi.reshape(-1, 1))
+            interaction_names.append('Mg_Hazard_Index')
+
+        # pH × HCO3 (buffering capacity proxy)
+        if 'pH' in feature_names and 'HCO3' in feature_names:
+            ph_idx = feature_names.index('pH')
+            hco3_idx = feature_names.index('HCO3')
+            ph_hco3 = X_numeric[:, ph_idx] * X_numeric[:, hco3_idx]
+            interactions.append(ph_hco3.reshape(-1, 1))
+            interaction_names.append('pH_x_HCO3')
+
+        # Na/Cl molar ratio (seawater intrusion indicator; ratio >1 suggests fresh water)
+        if 'Na' in feature_names and 'Cl' in feature_names:
+            na_idx = feature_names.index('Na')
+            cl_idx = feature_names.index('Cl')
+            na_cl = X_numeric[:, na_idx] / (X_numeric[:, cl_idx] + epsilon)
+            interactions.append(na_cl.reshape(-1, 1))
+            interaction_names.append('Na_div_Cl')
+
+        # ERA5 × chemistry interactions (climate modulates ion concentrations)
+        # High rainfall dilutes EC; low rainfall concentrates salinity
+        if 'era5_precip_monsoon_mm' in feature_names and 'EC' in feature_names:
+            rain_idx = feature_names.index('era5_precip_monsoon_mm')
+            ec_idx_2 = feature_names.index('EC')
+            # EC per unit monsoon rain — higher = more concentrated salinity
+            ec_per_rain = X_numeric[:, ec_idx_2] / (X_numeric[:, rain_idx] + epsilon)
+            interactions.append(ec_per_rain.reshape(-1, 1))
+            interaction_names.append('EC_per_monsoon_rain')
+
+        # NDVI × NO3 — disabled (GEE not configured; NDVI data unavailable)
+        # if 'ndvi_oct_nov_mean' in feature_names and 'NO3' in feature_names:
+        #     ndvi_idx = feature_names.index('ndvi_oct_nov_mean')
+        #     no3_idx = feature_names.index('NO3')
+        #     ndvi_no3 = X_numeric[:, ndvi_idx] * X_numeric[:, no3_idx]
+        #     interactions.append(ndvi_no3.reshape(-1, 1))
+        #     interaction_names.append('NDVI_x_NO3')
+
+        # Soil moisture × SAR (wet soils under high-sodium water → more dispersive)
+        if 'era5_soil_moisture_monsoon' in feature_names and 'SAR' in feature_names:
+            sm_idx = feature_names.index('era5_soil_moisture_monsoon')
+            sar_idx_2 = feature_names.index('SAR')
+            sm_sar = X_numeric[:, sm_idx] * X_numeric[:, sar_idx_2]
+            interactions.append(sm_sar.reshape(-1, 1))
+            interaction_names.append('soil_moisture_x_SAR')
 
         if interactions:
             X_interact = np.concatenate(interactions, axis=1).astype(np.float32)

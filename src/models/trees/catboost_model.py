@@ -75,7 +75,12 @@ class CatBoostForecaster(BaseForecaster):
         self._n_features = X.shape[1]
         self._n_classes = len(np.unique(y))
         self._feature_names = feature_names
-        self._categorical_features = categorical_features or []
+
+        # If data is float, categoricals are already numerically encoded — don't pass cat_features
+        if (categorical_features or []) and X.dtype.kind == 'f':
+            self._categorical_features = []
+        else:
+            self._categorical_features = categorical_features or []
 
         # Build model parameters
         params = self._build_params()
@@ -106,6 +111,15 @@ class CatBoostForecaster(BaseForecaster):
             plot=False
         )
 
+        # Build training_history for animation (per-iteration MultiClass loss)
+        evals = self._model.get_evals_result()
+        train_loss = list(evals.get('learn', {}).get('MultiClass', []))
+        val_loss = list(evals.get('validation', {}).get('MultiClass', []))
+        self.training_history = {
+            'train_loss': train_loss,
+            'val_loss': val_loss if val_loss else train_loss,
+        }
+
         self._is_fitted = True
         logger.info(f"CatBoost fitted with {self._n_features} features, {self._n_classes} classes")
 
@@ -135,9 +149,12 @@ class CatBoostForecaster(BaseForecaster):
             if config_key in self.config.params:
                 params[catboost_key] = self.config.params[config_key]
 
-        # Class weights
+        # Class weights — sort by class index to guarantee correct order
         if self.config.class_weights:
-            params['class_weights'] = list(self.config.class_weights.values())
+            n_cls = self._n_classes or len(self.config.class_weights)
+            params['class_weights'] = [
+                self.config.class_weights.get(i, 1.0) for i in range(n_cls)
+            ]
 
         # Early stopping
         if self.config.params.get('early_stopping_rounds'):

@@ -92,10 +92,10 @@ RISK_TIER_MAPPING: Dict[str, str] = {
 HIGH_RISK_CLASSES = ['T3_Restricted']
 
 # Ordinal encoding for tier-distance computations (tier index on a 1-3 scale)
-ORDINAL_ENCODING: Dict[str, tuple] = {
-    'T1_Safe':       (1, 1),
-    'T2_Marginal':   (2, 2),
-    'T3_Restricted': (3, 3),
+ORDINAL_ENCODING: Dict[str, int] = {
+    'T1_Safe':       1,
+    'T2_Marginal':   2,
+    'T3_Restricted': 3,
 }
 
 
@@ -116,9 +116,9 @@ def get_high_risk_indices(label_encoder: Dict[str, int]) -> list:
     return indices
 
 
-def get_ordinal_mapping(label_encoder: Dict[str, int]) -> Dict[str, tuple]:
+def get_ordinal_mapping(label_encoder: Dict[str, int]) -> Dict[str, int]:
     """
-    Get ordinal (tier, tier) mapping for labels in encoder.
+    Get ordinal tier index mapping for labels in encoder.
 
     Args:
         label_encoder: Mapping of tier label to index

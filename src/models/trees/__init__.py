@@ -3,4 +3,11 @@
 from .catboost_model import CatBoostForecaster
 from .lightgbm_model import LightGBMForecaster
 
-__all__ = ["CatBoostForecaster", "LightGBMForecaster"]
+try:
+    from .xgboost_model import XGBoostForecaster
+    XGB_AVAILABLE = True
+except ImportError:
+    XGB_AVAILABLE = False
+    XGBoostForecaster = None
+
+__all__ = ["CatBoostForecaster", "LightGBMForecaster", "XGBoostForecaster"]

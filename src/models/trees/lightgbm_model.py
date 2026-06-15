@@ -79,9 +79,18 @@ class LightGBMForecaster(BaseForecaster):
         # Build model parameters
         params = self._build_params()
 
+        # Per-sample weights from class_weights config (LightGBM has no built-in class_weight param)
+        sample_weight = None
+        if self.config.class_weights:
+            sample_weight = np.array(
+                [self.config.class_weights.get(int(label), 1.0) for label in y],
+                dtype=np.float64
+            )
+
         # Create datasets
         train_data = lgb.Dataset(
             X, y,
+            weight=sample_weight,
             feature_name=feature_names,
             categorical_feature=self._categorical_features if self._categorical_features else 'auto'
         )
@@ -112,6 +121,9 @@ class LightGBMForecaster(BaseForecaster):
                 )
             )
 
+        evals_result: Dict[str, Any] = {}
+        callbacks.append(lgb.record_evaluation(evals_result))
+
         # Train model
         self._model = lgb.train(
             params,
@@ -121,6 +133,14 @@ class LightGBMForecaster(BaseForecaster):
             valid_names=valid_names,
             callbacks=callbacks
         )
+
+        # Build training_history for animation (per-round logloss)
+        train_loss = evals_result.get('train', {}).get('multi_logloss', [])
+        val_loss = evals_result.get('valid', {}).get('multi_logloss', [])
+        self.training_history = {
+            'train_loss': list(train_loss),
+            'val_loss': list(val_loss) if val_loss else list(train_loss),
+        }
 
         self._is_fitted = True
         logger.info(f"LightGBM fitted with {self._n_features} features, {self._n_classes} classes")
@@ -149,17 +169,15 @@ class LightGBMForecaster(BaseForecaster):
             'reg_alpha': 'reg_alpha',
             'reg_lambda': 'reg_lambda',
             'subsample': 'bagging_fraction',
-            'colsample_bytree': 'feature_fraction'
+            'colsample_bytree': 'feature_fraction',
+            'num_threads': 'num_threads',
         }
 
         for config_key, lgb_key in param_mapping.items():
             if lgb_key and config_key in self.config.params:
                 params[lgb_key] = self.config.params[config_key]
 
-        # Class weights
-        if self.config.class_weights:
-            # LightGBM uses sample weights, so we need to apply during training
-            pass  # Handled in dataset creation
+        # Class weights are passed as per-sample weights at dataset creation time
 
         return params
 

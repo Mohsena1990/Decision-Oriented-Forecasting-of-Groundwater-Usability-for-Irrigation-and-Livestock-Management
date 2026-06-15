@@ -7,12 +7,15 @@ for hyperparameter and feature selection optimization.
 """
 
 import logging
+import os
+import pickle
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .pareto import ParetoArchive
+from .pareto import ParetoArchive, dominates
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +68,10 @@ class PSOGWO:
 
     # Hybrid weight (0=pure PSO, 1=pure GWO)
     hybrid_weight: float = 0.5
+
+    # Parallel workers for particle evaluation (threading backend — GIL released
+    # by numpy/sklearn/PyTorch during compute, so threads give real concurrency)
+    n_workers: int = 1
 
     # Random state
     random_state: int = 42
@@ -126,7 +133,9 @@ class PSOGWO:
     def optimize(
         self,
         objective_fn: Callable[[np.ndarray], np.ndarray],
-        verbose: bool = True
+        verbose: bool = True,
+        checkpoint_path: Optional[str] = None,
+        n_features: int = 0,
     ) -> OptimizationResult:
         """
         Run the optimization.
@@ -134,53 +143,73 @@ class PSOGWO:
         Args:
             objective_fn: Function that takes position and returns objective vector
             verbose: Whether to log progress
+            checkpoint_path: Path to save/resume checkpoint pickle (None = no checkpointing)
 
         Returns:
             OptimizationResult with best solutions
         """
-        history = []
+        history: List[Dict[str, Any]] = []
         n_evaluations = 0
+        start_iteration = 0
 
-        # Evaluate initial population
-        logger.info(f"Evaluating initial population ({self.population_size} particles)...")
-        for i, particle in enumerate(self._particles):
-            objectives = objective_fn(particle.position)
-            n_evaluations += 1
-            particle.personal_best_objectives = objectives.copy()
-            self._pareto_archive.add(particle.position.copy(), objectives.copy())
-            if verbose and (i + 1) % 5 == 0:
-                logger.info(f"  Initial evaluation: {i + 1}/{self.population_size} particles done")
+        # --- Resume from checkpoint if one exists ---
+        if checkpoint_path and Path(checkpoint_path).exists():
+            state = self._load_checkpoint(checkpoint_path, n_features=n_features)
+            if state is not None:
+                self._particles = state['particles']
+                self._pareto_archive = state['pareto_archive']
+                history = state['history']
+                n_evaluations = state['n_evaluations']
+                start_iteration = state['start_from_iteration']
+                rng_state = state.get('rng_state')
+                if rng_state is not None:
+                    try:
+                        self._rng.bit_generator.state = rng_state
+                    except Exception:
+                        pass
+                logger.info(f"Resumed from checkpoint — starting at iteration {start_iteration} "
+                            f"({n_evaluations} evaluations already done)")
 
-        # Main optimization loop
+        # --- Evaluate initial population (skipped when resuming past init) ---
+        if start_iteration == 0:
+            logger.info(f"Evaluating initial population ({self.population_size} particles)...")
+            init_positions = [p.position for p in self._particles]
+            objectives_init = self._eval_parallel(objective_fn, init_positions)
+            n_evaluations += len(init_positions)
+            for i, (particle, objectives) in enumerate(zip(self._particles, objectives_init)):
+                particle.personal_best_objectives = objectives.copy()
+                self._pareto_archive.add(particle.position.copy(), objectives.copy())
+                if verbose and (i + 1) % 5 == 0:
+                    logger.info(f"  Initial evaluation: {i + 1}/{self.population_size} particles done")
+            if checkpoint_path:
+                self._save_checkpoint(checkpoint_path, 0, history, n_evaluations, n_features)
+
+        # --- Main optimization loop ---
         logger.info(f"Starting optimization ({self.max_iterations} iterations)...")
-        for iteration in range(self.max_iterations):
+        for iteration in range(start_iteration, self.max_iterations):
             self._iteration = iteration
 
             if verbose:
-                logger.info(f"Iteration {iteration + 1}/{self.max_iterations} - Evaluating {self.population_size} particles...")
+                logger.info(f"Iteration {iteration + 1}/{self.max_iterations} — "
+                            f"computing {self.population_size} particle positions...")
 
-            # Compute adaptive parameters
             a = self.a_start - (self.a_start - self.a_end) * (iteration / self.max_iterations)
-            w = self.w * (1 - 0.5 * iteration / self.max_iterations)  # Decreasing inertia
+            w = self.w * (1 - 0.5 * iteration / self.max_iterations)
 
-            # Get current leaders from Pareto archive
             alpha, beta, gamma = self._get_wolves()
 
-            for p_idx, particle in enumerate(self._particles):
-                # PSO velocity update
+            # Phase 1: compute all new positions sequentially (uses _rng — not thread-safe)
+            updates: List[Tuple[np.ndarray, np.ndarray]] = []
+            for particle in self._particles:
                 r1 = self._rng.random(self.n_dimensions)
                 r2 = self._rng.random(self.n_dimensions)
-
                 cognitive = self.c1 * r1 * (particle.personal_best_position - particle.position)
                 social = self.c2 * r2 * (alpha - particle.position)
-
                 pso_velocity = w * particle.velocity + cognitive + social
 
-                # GWO position update
                 A1 = 2 * a * self._rng.random(self.n_dimensions) - a
                 A2 = 2 * a * self._rng.random(self.n_dimensions) - a
                 A3 = 2 * a * self._rng.random(self.n_dimensions) - a
-
                 C1 = 2 * self._rng.random(self.n_dimensions)
                 C2 = 2 * self._rng.random(self.n_dimensions)
                 C3 = 2 * self._rng.random(self.n_dimensions)
@@ -188,56 +217,60 @@ class PSOGWO:
                 D_alpha = np.abs(C1 * alpha - particle.position)
                 D_beta = np.abs(C2 * beta - particle.position)
                 D_gamma = np.abs(C3 * gamma - particle.position)
+                gwo_position = (alpha - A1 * D_alpha + beta - A2 * D_beta + gamma - A3 * D_gamma) / 3
 
-                X1 = alpha - A1 * D_alpha
-                X2 = beta - A2 * D_beta
-                X3 = gamma - A3 * D_gamma
+                new_velocity = (
+                    (1 - self.hybrid_weight) * pso_velocity
+                    + self.hybrid_weight * (gwo_position - particle.position)
+                )
+                new_position = np.clip(
+                    particle.position + new_velocity, self.bounds_lower, self.bounds_upper
+                )
+                updates.append((new_velocity, new_position))
 
-                gwo_position = (X1 + X2 + X3) / 3
+            # Phase 2: evaluate all new positions in parallel
+            new_positions = [pos for _, pos in updates]
+            objectives_list = self._eval_parallel(objective_fn, new_positions)
+            n_evaluations += len(new_positions)
 
-                # Hybrid update
-                new_velocity = (1 - self.hybrid_weight) * pso_velocity + \
-                              self.hybrid_weight * (gwo_position - particle.position)
+            if verbose:
+                logger.info(f"  Iteration {iteration + 1}: {len(new_positions)} evaluations complete")
 
-                new_position = particle.position + new_velocity
-
-                # Apply bounds
-                new_position = np.clip(new_position, self.bounds_lower, self.bounds_upper)
-
-                # Update particle
+            # Phase 3: update particles with results
+            for particle, (new_velocity, new_position), objectives in zip(
+                self._particles, updates, objectives_list
+            ):
                 particle.velocity = new_velocity
                 particle.position = new_position
 
-                # Evaluate new position
-                objectives = objective_fn(particle.position)
-                n_evaluations += 1
-
-                # Log progress every 5 particles
-                if verbose and (p_idx + 1) % 5 == 0:
-                    logger.info(f"  Particle {p_idx + 1}/{self.population_size} evaluated, obj={objectives[0]:.4f}")
-
-                # Update personal best (using first objective for comparison)
-                if objectives[0] < particle.personal_best_objectives[0]:
+                if dominates(objectives, particle.personal_best_objectives):
                     particle.personal_best_position = particle.position.copy()
                     particle.personal_best_objectives = objectives.copy()
+                elif not dominates(particle.personal_best_objectives, objectives):
+                    if self._rng.random() < 0.3:
+                        particle.personal_best_position = particle.position.copy()
+                        particle.personal_best_objectives = objectives.copy()
 
-                # Update Pareto archive
                 self._pareto_archive.add(particle.position.copy(), objectives.copy())
 
-            # Record history
             best = self._pareto_archive.get_best_by_objective(0)
             if best:
                 history.append({
                     'iteration': iteration,
                     'best_objectives': best[1].copy(),
                     'archive_size': len(self._pareto_archive),
-                    'n_evaluations': n_evaluations
+                    'n_evaluations': n_evaluations,
                 })
-
                 if verbose:
-                    logger.info(f"Iteration {iteration + 1}/{self.max_iterations} complete: Best obj = {best[1][0]:.4f}, Archive size = {len(self._pareto_archive)}")
+                    logger.info(
+                        f"Iteration {iteration + 1}/{self.max_iterations} complete: "
+                        f"Best obj = {best[1][0]:.4f}, Archive size = {len(self._pareto_archive)}"
+                    )
 
-        # Return results
+            # Checkpoint after each completed iteration
+            if checkpoint_path:
+                self._save_checkpoint(checkpoint_path, iteration + 1, history, n_evaluations, n_features)
+
         best = self._pareto_archive.get_best_by_objective(0)
         if best:
             best_position, best_objectives = best
@@ -250,8 +283,73 @@ class PSOGWO:
             best_objectives=best_objectives,
             pareto_front=self._pareto_archive.get_front(),
             history=history,
-            n_evaluations=n_evaluations
+            n_evaluations=n_evaluations,
         )
+
+    def _eval_parallel(
+        self,
+        objective_fn: Callable[[np.ndarray], np.ndarray],
+        positions: List[np.ndarray],
+    ) -> List[np.ndarray]:
+        """Evaluate positions with optional threading parallelism.
+
+        Threading releases the GIL during numpy/sklearn/PyTorch compute, giving
+        real concurrency for both CPU tree models and GPU neural models.
+        """
+        n_jobs = min(self.n_workers, len(positions))
+        if n_jobs > 1:
+            try:
+                from joblib import Parallel, delayed
+                return Parallel(n_jobs=n_jobs, backend='threading')(
+                    delayed(objective_fn)(pos) for pos in positions
+                )
+            except Exception as exc:
+                logger.warning(f"Parallel evaluation failed ({exc}), falling back to sequential")
+        return [objective_fn(pos) for pos in positions]
+
+    def _save_checkpoint(
+        self, path: str, start_from_iteration: int, history: list, n_evaluations: int,
+        n_features: int = 0,
+    ) -> None:
+        """Atomically write optimizer state to a pickle checkpoint file."""
+        state = {
+            'particles': self._particles,
+            'pareto_archive': self._pareto_archive,
+            'history': history,
+            'n_evaluations': n_evaluations,
+            'start_from_iteration': start_from_iteration,
+            'rng_state': self._rng.bit_generator.state,
+            'n_features': n_features,
+        }
+        tmp = path + '.tmp'
+        try:
+            with open(tmp, 'wb') as fh:
+                pickle.dump(state, fh, protocol=5)
+            os.replace(tmp, path)
+        except Exception as exc:
+            logger.warning(f"Checkpoint save failed: {exc}")
+
+    def _load_checkpoint(self, path: str, n_features: int = 0) -> Optional[dict]:
+        """Load checkpoint state dict.
+
+        Returns None (triggering a fresh run) if the checkpoint was written with a
+        different number of features — stale checkpoints cause the optimiser to reuse
+        hyperparameters tuned for a different search-space dimensionality.
+        """
+        try:
+            with open(path, 'rb') as fh:
+                state = pickle.load(fh)
+            stored_nf = state.get('n_features', 0)
+            if n_features > 0 and stored_nf > 0 and stored_nf != n_features:
+                logger.warning(
+                    f"Checkpoint n_features mismatch ({stored_nf} stored vs {n_features} current) "
+                    f"— discarding stale checkpoint and restarting optimisation."
+                )
+                return None
+            return state
+        except Exception as exc:
+            logger.warning(f"Checkpoint load failed: {exc}")
+            return None
 
     def _get_wolves(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Get alpha, beta, gamma wolves from Pareto archive."""

@@ -78,23 +78,59 @@ class TreeSHAPExplainer:
         else:
             internal_model = model
 
-        explainer = shap.TreeExplainer(internal_model)
+        # XGBoost 3.x stores base_score as a multi-class vector string which
+        # SHAP 0.49.x cannot parse in TreeExplainer.  When that happens, fall back
+        # to a fast LightGBM surrogate trained on model predictions so the rest of
+        # the SHAP pipeline (figures, importance table) works unchanged.
+        try:
+            explainer = shap.TreeExplainer(internal_model)
+            use_surrogate = False
+        except (ValueError, TypeError, Exception) as tree_err:
+            logger.debug(f"TreeExplainer failed ({tree_err}) — fitting LightGBM surrogate for SHAP")
+            use_surrogate = True
 
-        # Compute SHAP values
-        shap_values = explainer.shap_values(X)
+        if use_surrogate:
+            explainer, X = self._build_lgb_surrogate_explainer(model, X, feature_names)
+
+        # Compute SHAP values — handle both legacy and SHAP 0.46+ Explanation API
+        raw = explainer(X)  # returns Explanation object in SHAP 0.46+
+
+        if hasattr(raw, 'values'):
+            # SHAP 0.46+: Explanation object with .values ndarray
+            shap_values = raw.values
+            base_values = raw.base_values if hasattr(raw, 'base_values') else None
+        else:
+            # Legacy: direct ndarray or list
+            shap_values = raw
+            base_values = None
 
         # Handle different output formats
         if isinstance(shap_values, list):
             # Multi-class: list of (n_samples, n_features) arrays
             shap_values = np.stack(shap_values, axis=-1)
 
+        # Ensure float array (XGBoost 3.x can return object arrays in some versions)
+        try:
+            shap_values = np.array(shap_values, dtype=np.float64)
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"Could not convert SHAP values to float array. "
+                f"Got type {type(shap_values)}, shape-like {getattr(shap_values, 'shape', 'N/A')}"
+            )
+
+        # shap_values shape for multi-class XGBoost/LightGBM via Explanation:
+        # (n_samples, n_features, n_classes) — already correct 3-D format
+        # For 2-D binary output: (n_samples, n_features) — also fine
+
         # Get base values
-        if hasattr(explainer, 'expected_value'):
-            base_values = explainer.expected_value
-            if isinstance(base_values, list):
-                base_values = np.array(base_values)
+        if base_values is not None:
+            if isinstance(base_values, (list, np.ndarray)):
+                base_values = np.array(base_values, dtype=np.float64)
+        elif hasattr(explainer, 'expected_value'):
+            ev = explainer.expected_value
+            base_values = np.array(ev, dtype=np.float64) if isinstance(ev, (list, np.ndarray)) else np.array([ev], dtype=np.float64)
         else:
-            base_values = np.zeros(shap_values.shape[-1] if len(shap_values.shape) > 2 else 1)
+            base_values = np.zeros(shap_values.shape[-1] if shap_values.ndim > 2 else 1)
 
         # Set feature names
         if feature_names is None:
@@ -113,6 +149,38 @@ class TreeSHAPExplainer:
             global_importance=global_importance,
             top_features=top_features
         )
+
+    def _build_lgb_surrogate_explainer(self, model, X, feature_names):
+        """
+        Fit a small LightGBM model on the predictions of `model` and return a
+        TreeExplainer wrapping it.  Used as a fast fallback when TreeExplainer
+        cannot parse the primary model (e.g. XGBoost 3.x base_score format).
+        """
+        try:
+            import lightgbm as lgb
+        except ImportError:
+            raise ImportError("LightGBM required as SHAP surrogate when XGBoost 3.x is used")
+
+        y_pred = model.predict(X)
+        n_classes = len(np.unique(y_pred))
+        n_classes = max(n_classes, 2)
+
+        params = {
+            'objective': 'multiclass' if n_classes > 2 else 'binary',
+            'num_class': n_classes if n_classes > 2 else None,
+            'n_estimators': 100,
+            'max_depth': 4,
+            'learning_rate': 0.1,
+            'verbose': -1,
+            'force_col_wise': True,
+        }
+        if params['num_class'] is None:
+            del params['num_class']
+
+        surrogate = lgb.LGBMClassifier(**params)
+        surrogate.fit(X, y_pred)
+        surrogate_explainer = shap.TreeExplainer(surrogate)
+        return surrogate_explainer, X
 
     def _compute_global_importance(
         self,

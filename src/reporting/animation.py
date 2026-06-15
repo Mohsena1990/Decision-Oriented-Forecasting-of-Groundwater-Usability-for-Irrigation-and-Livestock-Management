@@ -222,6 +222,14 @@ class TrainingAnimator:
             return None
 
         max_epochs = max(len(v) for v in valid.values())
+
+        # Pad shorter series by holding their final value so all models are
+        # visible on the same x-axis for the full animation duration.
+        valid = {
+            name: (vals + [vals[-1]] * (max_epochs - len(vals)))
+            for name, vals in valid.items()
+        }
+
         colors = plt.cm.tab10(np.linspace(0, 1, len(valid)))
 
         fig, ax = plt.subplots(figsize=(9, 5))

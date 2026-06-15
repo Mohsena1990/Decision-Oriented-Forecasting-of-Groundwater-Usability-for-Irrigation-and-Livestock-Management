@@ -30,8 +30,32 @@ logger = logging.getLogger(__name__)
 
 
 if TORCH_AVAILABLE:
+    class FeatureAttention(nn.Module):
+        """
+        Lightweight feature-level self-attention head.
+
+        Applied after the RNN hidden state: learns which hidden
+        dimensions are most predictive per sample.
+        """
+
+        def __init__(self, hidden_size: int):
+            super().__init__()
+            self.query = nn.Linear(hidden_size, hidden_size, bias=False)
+            self.key = nn.Linear(hidden_size, hidden_size, bias=False)
+            self.value = nn.Linear(hidden_size, hidden_size, bias=False)
+            self.scale = hidden_size ** -0.5
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x3d = x.unsqueeze(1)
+            q = self.query(x3d)
+            k = self.key(x3d)
+            v = self.value(x3d)
+            attn = torch.softmax(torch.bmm(q, k.transpose(1, 2)) * self.scale, dim=-1)
+            out = torch.bmm(attn, v).squeeze(1)
+            return out + x  # residual connection
+
     class LSTMNetwork(nn.Module):
-        """LSTM-based network with categorical embeddings."""
+        """LSTM-based network with categorical embeddings and feature attention."""
 
         def __init__(
             self,
@@ -41,7 +65,8 @@ if TORCH_AVAILABLE:
             hidden_size: int = 64,
             num_layers: int = 1,
             dropout: float = 0.2,
-            embedding_dim: int = 16
+            embedding_dim: int = 16,
+            use_attention: bool = True
         ):
             super().__init__()
 
@@ -69,13 +94,14 @@ if TORCH_AVAILABLE:
                 batch_first=True
             )
 
+            # Feature-level self-attention over hidden state
+            self.attention = FeatureAttention(hidden_size) if use_attention else None
+
             # Output layers
             self.dropout = nn.Dropout(dropout)
             self.fc = nn.Linear(hidden_size, n_classes)
 
         def forward(self, x_numeric: torch.Tensor, x_categorical: torch.Tensor) -> torch.Tensor:
-            batch_size = x_numeric.size(0)
-
             # Process categorical features
             embedded = []
             for i, (idx, _) in enumerate(self.categorical_cardinalities.items()):
@@ -98,6 +124,10 @@ if TORCH_AVAILABLE:
 
             # Take last hidden state
             output = h_n[-1]
+
+            # Apply feature-level self-attention
+            if self.attention is not None:
+                output = self.attention(output)
 
             # Classification head
             output = self.dropout(output)
@@ -174,6 +204,7 @@ class LSTMForecaster(BaseForecaster):
         X_categorical = X[:, categorical_features].astype(np.int64) if categorical_features else np.zeros((len(X), 0), dtype=np.int64)
 
         # Create network
+        use_attention = self.config.params.get('use_attention', True)
         net = LSTMNetwork(
             n_numeric=self._n_numeric,
             n_classes=self._n_classes,
@@ -181,7 +212,8 @@ class LSTMForecaster(BaseForecaster):
             hidden_size=self.config.params.get('hidden_size', 64),
             num_layers=self.config.params.get('num_layers', 1),
             dropout=self.config.params.get('dropout', 0.2),
-            embedding_dim=self.config.params.get('embedding_dim', 16)
+            embedding_dim=self.config.params.get('embedding_dim', 16),
+            use_attention=use_attention
         )
         try:
             self._network = net.to(self._device)
@@ -190,10 +222,28 @@ class LSTMForecaster(BaseForecaster):
             self._device = torch.device('cpu')
             self._network = net.to(self._device)
 
-        # Training setup
-        criterion = nn.CrossEntropyLoss(
-            weight=self._get_class_weights(y) if self.config.class_weights else None
-        )
+        # Training setup — use Focal Loss to address class imbalance
+        use_focal = self.config.params.get('use_focal_loss', True)
+        focal_gamma = self.config.params.get('focal_gamma', 2.0)
+        try:
+            from src.imbalance.enhanced_handlers import create_loss_function
+            if use_focal:
+                criterion = create_loss_function(
+                    class_weights=self.config.class_weights,
+                    loss_type='focal',
+                    gamma=focal_gamma,
+                    n_classes=self._n_classes,
+                    device=str(self._device)
+                ).to(self._device)
+                logger.info(f"LSTM using FocalLoss(gamma={focal_gamma})")
+            else:
+                criterion = nn.CrossEntropyLoss(
+                    weight=self._get_class_weights(y) if self.config.class_weights else None
+                )
+        except Exception:
+            criterion = nn.CrossEntropyLoss(
+                weight=self._get_class_weights(y) if self.config.class_weights else None
+            )
         optimizer = optim.Adam(
             self._network.parameters(),
             lr=self.config.params.get('learning_rate', 0.001)
@@ -394,7 +444,8 @@ class LSTMForecaster(BaseForecaster):
             hidden_size=self.config.params.get('hidden_size', 64),
             num_layers=self.config.params.get('num_layers', 1),
             dropout=self.config.params.get('dropout', 0.2),
-            embedding_dim=self.config.params.get('embedding_dim', 16)
+            embedding_dim=self.config.params.get('embedding_dim', 16),
+            use_attention=self.config.params.get('use_attention', True)
         ).to(self._device)
 
         self._network.load_state_dict(torch.load(path.with_suffix('.pth'), map_location=self._device))

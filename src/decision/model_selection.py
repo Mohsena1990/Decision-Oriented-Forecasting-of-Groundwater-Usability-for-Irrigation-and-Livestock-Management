@@ -93,6 +93,10 @@ class ModelSelector:
             ModelSelectionResult with selected model and rankings
         """
         model_names = list(model_results.keys())
+        if not model_names:
+            raise ValueError(
+                "No model results to select from — all Stage F optimizations may have failed"
+            )
 
         # Use test objectives if available, otherwise CV objectives
         objectives = []

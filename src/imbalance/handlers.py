@@ -113,6 +113,8 @@ class ImbalanceHandler:
 
         if strategy == 'smote_tomek':
             X_res, y_res = self._smote_tomek(X, y)
+        elif strategy == 'borderline2_tomek':
+            X_res, y_res = self._borderline2_tomek(X, y)
         elif strategy == 'borderline_smote':
             X_res, y_res = self._borderline_smote(X, y)
         elif strategy == 'adasyn':
@@ -149,6 +151,37 @@ class ImbalanceHandler:
             logger.warning(f"SMOTETomek failed ({e}). Falling back to SMOTE.")
             return self._smote(X, y)
 
+    def _borderline2_tomek(self, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """BorderlineSMOTE-2 oversampling followed by Tomek links cleaning.
+
+        SMOTETomek only accepts a plain SMOTE instance for its `smote=` parameter,
+        not BorderlineSMOTE.  Apply the two steps sequentially instead.
+        """
+        try:
+            from imblearn.over_sampling import BorderlineSMOTE
+            from imblearn.under_sampling import TomekLinks
+
+            unique, counts = np.unique(y, return_counts=True)
+            safe_k = max(1, min(self.smote_k_neighbors, int(counts.min()) - 1))
+
+            oversampler = BorderlineSMOTE(
+                k_neighbors=safe_k,
+                random_state=self.random_state,
+                kind='borderline-2',
+            )
+            X_res, y_res = oversampler.fit_resample(X, y)
+
+            cleaner = TomekLinks()
+            X_res, y_res = cleaner.fit_resample(X_res, y_res)
+
+            return X_res, y_res
+        except ImportError:
+            logger.warning("imbalanced-learn not installed. Falling back to SMOTETomek.")
+            return self._smote_tomek(X, y)
+        except Exception as e:
+            logger.warning(f"BorderlineSMOTE-2+Tomek failed ({e}). Falling back to SMOTETomek.")
+            return self._smote_tomek(X, y)
+
     def _borderline_smote(self, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         try:
             from imblearn.over_sampling import BorderlineSMOTE
@@ -156,7 +189,7 @@ class ImbalanceHandler:
             resampler = BorderlineSMOTE(
                 k_neighbors=self.smote_k_neighbors,
                 random_state=self.random_state,
-                kind='borderline-1'
+                kind='borderline-2'
             )
             return resampler.fit_resample(X, y)
         except ImportError:

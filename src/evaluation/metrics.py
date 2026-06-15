@@ -32,8 +32,8 @@ class MetricsCalculator:
     ordinal and severity-aware metrics.
     """
 
-    # Ordinal encoding for C and S components
-    label_to_ordinal: Dict[str, Tuple[int, int]] = field(default_factory=dict)
+    # Ordinal tier index for each tier label (single int per tier after 3-tier merge)
+    label_to_ordinal: Dict[str, int] = field(default_factory=dict)
 
     # High-risk class indices
     high_risk_indices: List[int] = field(default_factory=list)
@@ -41,9 +41,8 @@ class MetricsCalculator:
     # Index to label mapping
     idx_to_label: Dict[int, str] = field(default_factory=dict)
 
-    # Weights for ordinal distance
-    c_weight: float = 1.0
-    s_weight: float = 1.0
+    # Weight for ordinal distance (single tier dimension)
+    tier_weight: float = 1.0
 
     def compute_all(
         self,
@@ -102,9 +101,8 @@ class MetricsCalculator:
                 true_ord = self.label_to_ordinal.get(true_label)
                 pred_ord = self.label_to_ordinal.get(pred_label)
 
-                if true_ord and pred_ord:
-                    dist = self.c_weight * abs(true_ord[0] - pred_ord[0]) + \
-                           self.s_weight * abs(true_ord[1] - pred_ord[1])
+                if true_ord is not None and pred_ord is not None:
+                    dist = self.tier_weight * abs(true_ord - pred_ord)
                     distances.append(dist)
 
         if distances:
@@ -231,11 +229,10 @@ class MetricsCalculator:
 
 
 def create_metrics_function(
-    label_to_ordinal: Dict[str, Tuple[int, int]],
+    label_to_ordinal: Dict[str, int],
     idx_to_label: Dict[int, str],
     high_risk_indices: List[int],
-    c_weight: float = 1.0,
-    s_weight: float = 1.0
+    tier_weight: float = 1.0
 ) -> callable:
     """
     Create a metrics function for use in CV evaluation.
@@ -246,8 +243,7 @@ def create_metrics_function(
         label_to_ordinal=label_to_ordinal,
         idx_to_label=idx_to_label,
         high_risk_indices=high_risk_indices,
-        c_weight=c_weight,
-        s_weight=s_weight
+        tier_weight=tier_weight,
     )
 
     def metrics_fn(y_true: np.ndarray, y_pred: np.ndarray, y_proba: np.ndarray) -> Dict[str, float]:

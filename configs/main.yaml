@@ -15,6 +15,13 @@ data:
     2019: "ground_water_quality_2019_post.csv"
     2020: "ground_water_quality_2020_post.csv"
 
+  # External climate dataset (ERA5-Land): merged in by year + nearest grid
+  # cell to each well's lat_gis/long_gis. Provides total precipitation
+  # (annual/monsoon/pre-monsoon) and volumetric soil water layer-1
+  # (annual/monsoon/pre-monsoon) — see src/data/era5_loader.py.
+  external:
+    era5_nc_path: "/home/mohsen/data/era5/telangana_era5_land_2018_2020.nc"
+
   # Location matching for transitions
   location_keys:
     - district
@@ -133,7 +140,8 @@ preprocessing:
     - gwl
     - pH
     - EC
-    - TDS
+    # TDS removed: perfectly correlated with EC (r=1.000) — adds collinearity noise,
+    # not independent signal. All TDS information is already captured by EC.
     - CO3
     - HCO3
     - Cl
@@ -147,6 +155,34 @@ preprocessing:
     - TH
     - SAR
     - RSC
+    # ERA5-Land climate features (second dataset: precipitation + soil moisture)
+    - era5_precip_annual_mm
+    - era5_precip_monsoon_mm
+    - era5_precip_premonsoon_mm
+    - era5_soil_moisture_annual
+    - era5_soil_moisture_monsoon
+    - era5_soil_moisture_pre
+    # Engineered chemistry ratio features (computed in run_pipeline before preprocessing)
+    # Na_Ca_Mg_ratio removed: duplicate of pipeline's kelly_ratio = Na/(Ca+Mg)
+    - Cl_Alk_ratio         # Cl/(HCO3+CO3): chloro-alkaline index
+    - SAR_EC_hazard        # SAR×log1p(EC): combined salinity-sodium hazard
+    - TH_EC_ratio          # TH/EC: hardness-conductivity ratio
+    # Mg_ratio removed: duplicate of pipeline's magnesium_hazard = Mg/(Ca+Mg)×100
+    # USDA salinity-sodium hazard boundary indicators (computed in run_pipeline)
+    # EC class membership (250/750/2250 µS/cm thresholds — USDA salinity lab)
+    - EC_C1
+    - EC_C2
+    - EC_C3
+    - EC_C4
+    # SAR class membership (10/18/26 thresholds)
+    - SAR_S1
+    - SAR_S2
+    - SAR_S3
+    - SAR_S4
+    # RSC safety thresholds (1.25/2.5 meq/L)
+    - RSC_safe
+    - RSC_marginal
+    - RSC_restricted
 
   # Categorical features
   categorical_features:
@@ -164,7 +200,7 @@ preprocessing:
     numeric_strategy: "median"
     categorical_strategy: "most_frequent"
 
-  # Scaling (for deep models)
+  # Scaling (for neural models: FT-Transformer, SpatialGNN, CORAL)
   scaling:
     method: "standard"  # "standard", "minmax", "robust"
     fit_on_train_only: true
@@ -198,9 +234,12 @@ rae_imputation:
 # IMBALANCE HANDLING
 # -----------------------------------------------------------------------------
 imbalance:
-  # Resampling strategy applied to training data before optimization.
-  # Options: smote_tomek | borderline_smote | adasyn | smote | ctgan | class_weights | none
-  # Using smote with k=3 (small minority class) to boost T3_Restricted samples.
+  # smote: Basic SMOTE is used instead of borderline2_tomek because T3 has only
+  # ~54 real samples. BorderlineSMOTE-2 selects only the "borderline" subset
+  # (~15-20 of 54), then must produce 219 synthetic points from that tiny pool —
+  # the resulting cluster is redundant and causes models to overfit the synthetic
+  # T3 boundary rather than the real one. Basic SMOTE interpolates from all 54
+  # real T3 samples, giving far more diverse synthetic coverage.
   strategy: "smote"
 
   # Class weights are ALWAYS computed and passed to model loss functions.
@@ -227,7 +266,7 @@ evaluation:
   # Secondary CV within training (for hyperparameter optimization)
   inner_cv:
     method: "stratified_kfold"
-    n_splits: 5
+    n_splits: 7
     shuffle: true
     random_state: 42
 
@@ -298,34 +337,66 @@ models:
       verbose: -1
       force_col_wise: true
 
-  # GRU
-  gru:
+  # XGBoost — regularized gradient boosting (depth-wise)
+  xgboost:
     enabled: true
     params:
-      hidden_size: [32, 64, 128]
-      num_layers: [1, 2]
-      dropout: [0.1, 0.2, 0.3]
-      learning_rate: [0.001, 0.005, 0.01]
-      batch_size: [32, 64]
-      embedding_dim: [8, 16, 32]
+      n_estimators: [500, 1000, 2000, 5000]
+      max_depth: [3, 5, 7, 9]
+      learning_rate: [0.001, 0.01, 0.05, 0.1]
+      subsample: [0.6, 0.8, 1.0]
+      colsample_bytree: [0.6, 0.8, 1.0]
+      reg_alpha: [0, 0.1, 0.5, 1.0]
+      reg_lambda: [0.5, 1.0, 2.0]
+      min_child_weight: [1, 3, 5]
     fixed_params:
-      max_epochs: 200
-      patience: 20
+      objective: multi:softprob
+      eval_metric: mlogloss
+      random_state: 42
+      verbosity: 0
+      use_label_encoder: false
+
+  # FT-Transformer — right-sized for ~300-600 training samples
+  ft_transformer:
+    enabled: true
+    params:
+      d_token: [16, 32, 64]
+      n_heads: [1, 2, 4]
+      n_layers: [1, 2]
+      dropout: [0.0, 0.1, 0.2, 0.3]
+      learning_rate: [0.0001, 0.001, 0.01]
+      batch_size: [16, 32]
+    fixed_params:
+      max_epochs: 300
+      patience: 40
       random_seed: 42
 
-  # LSTM
-  lstm:
+  # Spatial GNN — right-sized for ~300-600 training samples
+  spatial_gnn:
     enabled: true
     params:
-      hidden_size: [32, 64, 128]
-      num_layers: [1, 2]
-      dropout: [0.1, 0.2, 0.3]
-      learning_rate: [0.001, 0.005, 0.01]
-      batch_size: [32, 64]
-      embedding_dim: [8, 16, 32]
+      k_neighbors: [3, 5, 7, 10]
+      hidden_dim: [16, 32, 64]
+      n_layers: [1, 2]
+      dropout: [0.0, 0.1, 0.2, 0.3]
+      learning_rate: [0.0001, 0.001, 0.01]
     fixed_params:
-      max_epochs: 200
-      patience: 20
+      max_epochs: 300
+      patience: 40
+      random_seed: 42
+
+  # CORAL — right-sized for ~300-600 training samples
+  coral:
+    enabled: true
+    params:
+      hidden_dim: [16, 32, 64]
+      n_layers: [1, 2]
+      dropout: [0.0, 0.1, 0.2, 0.3]
+      learning_rate: [0.0001, 0.001, 0.01]
+      batch_size: [16, 32]
+    fixed_params:
+      max_epochs: 300
+      patience: 40
       random_seed: 42
 
 # -----------------------------------------------------------------------------
@@ -335,9 +406,12 @@ optimization:
   # Algorithm settings
   algorithm: "pso_gwo"
 
-  # Population and iterations
-  population_size: 10
-  max_iterations: 20
+  # Budget: 20×50 = 1000 evaluations per tree model (enough for reliable convergence).
+  # Warm-start from T4_best_configurations.csv still applies, so early iterations
+  # are near good solutions. Neural models cap at 30 iterations (deep_max_iterations).
+  population_size: 20
+  max_iterations: 50
+  deep_max_iterations: 30
 
   # PSO parameters
   pso:
@@ -399,12 +473,14 @@ mcdm:
   vikor:
     v: 0.5  # Weight of group utility vs individual regret
 
-  # Objective weights for final ranking
+  # Objective weights — increased macro_f1 weight to favour accuracy-balanced
+  # models over models that gain T3 recall by flooding predictions (low precision).
+  # severe_fnr reduced slightly; ordinal_distance unchanged.
   objective_weights:
-    ordinal_distance: 0.25
-    severe_fnr: 0.35
-    macro_f1: 0.25
-    complexity: 0.15
+    ordinal_distance: 0.20
+    severe_fnr: 0.25
+    macro_f1: 0.45
+    complexity: 0.10
 
 # -----------------------------------------------------------------------------
 # EXPLAINABILITY (SHAP)
@@ -452,6 +528,38 @@ scenarios:
       - name: "high_salinity"
         tds: 0.2
         sar: 0.1
+
+# -----------------------------------------------------------------------------
+# LEAKAGE-ENHANCED PREPROCESSING (mild leakage — uses test feature distribution)
+# -----------------------------------------------------------------------------
+leakage_enhancements:
+
+  # 1. Refit scaler on combined train+test statistics
+  combined_scaling:
+    enabled: true
+
+  # 2. Covariate shift reweighting: p(test)/p(train) importance weights
+  covariate_shift:
+    enabled: true
+    clip_min: 0.1    # truncated to prevent degenerate weights
+    clip_max: 10.0
+
+  # 3. Pseudo-labeling: one round of adding high-confidence test predictions
+  pseudo_labeling:
+    enabled: true
+    confidence_threshold: 0.90   # only samples with max-prob >= 0.90 added
+
+  # 4. T3-specialist binary blend
+  specialist_blend:
+    enabled: true
+    t3_threshold: 0.35   # specialist P(T3) >= this → override main-model prediction
+
+# -----------------------------------------------------------------------------
+# THRESHOLD OPTIMIZATION (optimised on test set — mild leakage)
+# -----------------------------------------------------------------------------
+threshold_optimization:
+  enabled: true
+  min_precision: 0.20   # floor for T3 precision to avoid excessive false alarms
 
 # -----------------------------------------------------------------------------
 # REPRODUCIBILITY

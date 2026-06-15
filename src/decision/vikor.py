@@ -61,6 +61,10 @@ class VIKOR:
         Returns:
             VIKORResult with rankings and scores
         """
+        if objectives.ndim == 1:
+            objectives = objectives.reshape(1, -1)
+        if objectives.shape[0] == 0:
+            raise ValueError("No alternatives to rank — objectives matrix is empty")
         n_alternatives, n_criteria = objectives.shape
 
         # Set weights

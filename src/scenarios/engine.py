@@ -252,7 +252,7 @@ class ScenarioEngine:
         baseline_pred = np.argmax(baseline_proba, axis=1)
         scenario_pred = np.argmax(scenario_proba, axis=1)
 
-        # Compute high-risk probability change
+        # Compute high-risk probability change (per sample)
         high_risk_prob_baseline = self._compute_high_risk_prob(baseline_proba)
         high_risk_prob_scenario = self._compute_high_risk_prob(scenario_proba)
         high_risk_prob_change = high_risk_prob_scenario - high_risk_prob_baseline
@@ -272,6 +272,26 @@ class ScenarioEngine:
             high_risk_prob_change=high_risk_prob_change,
             transition_matrix=transition_matrix
         )
+
+    def compute_safe_to_risky_escalation(self, result: ScenarioResult) -> float:
+        """
+        Fraction of currently-safe (non-T3) wells that become high-risk
+        under the scenario.
+
+        This is more interpretable than mean_prob_change, which averages
+        over wells already classified as T3 (where further increases have
+        no additional impact on the metric).
+
+        Returns a value in [0, 1].
+        """
+        if not self.high_risk_indices:
+            return 0.0
+        baseline_safe = ~np.isin(result.baseline_predictions, self.high_risk_indices)
+        n_safe = baseline_safe.sum()
+        if n_safe == 0:
+            return 0.0
+        escalated = baseline_safe & np.isin(result.scenario_predictions, self.high_risk_indices)
+        return float(escalated.sum() / n_safe)
 
     def _compute_high_risk_prob(self, proba: np.ndarray) -> np.ndarray:
         """Compute probability of high-risk class."""
@@ -416,12 +436,18 @@ class ScenarioEngine:
                 np.isin(result.scenario_predictions, self.high_risk_indices)
             )
 
+            # safe_to_risky: fraction of currently-safe wells that escalate to T3.
+            # This is the decision-relevant metric — it measures NEW risk, not
+            # diluted average across already-risky wells.
+            safe_to_risky = self.compute_safe_to_risky_escalation(result)
+
             records.append({
                 'scenario': name,
                 'n_samples': len(result.baseline_predictions),
                 'baseline_high_risk_rate': baseline_high_risk,
                 'scenario_high_risk_rate': scenario_high_risk,
                 'high_risk_rate_change': scenario_high_risk - baseline_high_risk,
+                'safe_to_risky_escalation': safe_to_risky,
                 'mean_prob_change': np.mean(result.high_risk_prob_change),
                 'max_prob_change': np.max(result.high_risk_prob_change),
                 'pct_class_changed': np.mean(

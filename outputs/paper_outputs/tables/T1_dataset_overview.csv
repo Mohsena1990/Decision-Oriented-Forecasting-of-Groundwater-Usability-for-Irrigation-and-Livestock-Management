@@ -16,6 +16,12 @@ SO4,0.0,Yes,0.0,Yes,0.0,Yes
 TDS,0.0,Yes,0.0,Yes,0.0,Yes
 TH,0.0,Yes,0.0,Yes,0.0,Yes
 district,0.0,Yes,0.0,Yes,0.0,Yes
+era5_precip_annual_mm,0.0,Yes,0.0,Yes,0.0,Yes
+era5_precip_monsoon_mm,0.0,Yes,0.0,Yes,0.0,Yes
+era5_precip_premonsoon_mm,0.0,Yes,0.0,Yes,0.0,Yes
+era5_soil_moisture_annual,0.0,Yes,0.0,Yes,0.0,Yes
+era5_soil_moisture_monsoon,0.0,Yes,0.0,Yes,0.0,Yes
+era5_soil_moisture_pre,0.0,Yes,0.0,Yes,0.0,Yes
 gwl,0.0,Yes,0.0,Yes,0.0,Yes
 lat_gis,0.0,Yes,0.0,Yes,0.0,Yes
 long_gis,0.0,Yes,0.0,Yes,0.0,Yes

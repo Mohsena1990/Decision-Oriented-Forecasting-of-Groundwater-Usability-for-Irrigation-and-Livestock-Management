@@ -28,11 +28,13 @@ flowchart TB
         D1 --> D2 --> D3
     end
 
-    subgraph Stage_E["Stage E: Model Candidates"]
+    subgraph Stage_E["Stage E: Model Candidates (6)"]
         E1[CatBoost]
         E2[LightGBM]
-        E3[GRU]
-        E4[LSTM]
+        E3[XGBoost]
+        E4[FT-Transformer]
+        E5[SpatialGNN]
+        E6[CORAL]
     end
 
     subgraph Stage_F["Stage F: Optimization"]

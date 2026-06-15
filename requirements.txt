@@ -10,8 +10,10 @@ pyyaml>=6.0
 # Tree-based models
 catboost>=1.0.0
 lightgbm>=3.3.0
+xgboost>=1.7.0
 
-# Deep learning (optional)
+# Advanced neural models (FT-Transformer, Spatial GNN, CORAL)
+# Require PyTorch — install separately if needed: pip install torch
 torch>=1.10.0
 
 # Explainability
