@@ -56,6 +56,77 @@ def _model_color(model_name: str, fallback_idx: int = 0) -> str:
     return palette[fallback_idx % len(palette)]
 
 
+# Human-readable labels for the raw hydrochemical / engineered / climate /
+# spatial column names, used to make SHAP and feature-importance figures
+# legible to a non-technical reader.
+FEATURE_LABELS: Dict[str, str] = {
+    # Core hydrochemistry
+    'EC': 'Electrical Conductivity (EC)',
+    'TDS': 'Total Dissolved Solids (TDS)',
+    'TH': 'Total Hardness (TH)',
+    'pH': 'pH',
+    'SAR': 'Sodium Adsorption Ratio (SAR)',
+    'RSC': 'Residual Sodium Carbonate (RSC)',
+    'rsc meq / l': 'Residual Sodium Carbonate (RSC)',
+    'gwl': 'Groundwater Level (GWL)',
+    'Na': 'Sodium (Na)',
+    'K': 'Potassium (K)',
+    'Ca': 'Calcium (Ca)',
+    'Mg': 'Magnesium (Mg)',
+    'Cl': 'Chloride (Cl)',
+    'F': 'Fluoride (F)',
+    'SO4': 'Sulphate (SO4)',
+    'NO3': 'Nitrate (NO3)',
+    'CO3': 'Carbonate (CO3)',
+    'HCO3': 'Bicarbonate (HCO3)',
+    # USSL salinity/sodium boundary indicators
+    'EC_C1': 'EC Salinity Class C1',
+    'EC_C2': 'EC Salinity Class C2',
+    'EC_C3': 'EC Salinity Class C3',
+    'EC_C4': 'EC Salinity Class C4',
+    'SAR_S1': 'SAR Sodium Class S1',
+    'SAR_S2': 'SAR Sodium Class S2',
+    'SAR_S3': 'SAR Sodium Class S3',
+    'SAR_S4': 'SAR Sodium Class S4',
+    'ussl_zone': 'USSL Zone',
+    # Engineered ratio / hazard features
+    'magnesium_hazard': 'Magnesium Hazard',
+    'kelly_ratio': 'Kelly Ratio (Na Dominance)',
+    'permeability_index': 'Permeability Index',
+    'Cl_Alk_ratio': 'Chloride-to-Alkalinity Ratio',
+    'TH_EC_ratio': 'Hardness-to-EC Ratio',
+    'SAR_EC_hazard': 'SAR-EC Hazard Interaction',
+    'current_class': 'Current-Year Risk Class',
+    # Spatial / administrative
+    'lat_gis': 'Latitude',
+    'long_gis': 'Longitude',
+    'district': 'District',
+    'mandal': 'Mandal',
+    'village': 'Village',
+    'year': 'Year',
+    # ERA5-Land climate context
+    'era5_precip_annual_mm': 'ERA5 Annual Precipitation (mm)',
+    'era5_precip_monsoon_mm': 'ERA5 Monsoon Precipitation (mm)',
+    'era5_precip_premonsoon_mm': 'ERA5 Pre-Monsoon Precipitation (mm)',
+    'era5_soil_moisture_annual': 'ERA5 Annual Soil Moisture',
+    'era5_soil_moisture_monsoon': 'ERA5 Monsoon Soil Moisture',
+    'era5_soil_moisture_pre': 'ERA5 Pre-Monsoon Soil Moisture',
+}
+
+
+def _friendly_feature_name(name: str) -> str:
+    """Map a raw feature/column name to a publication-readable label.
+
+    Falls back to de-slugging (underscores → spaces, capitalised) for any
+    column not in the explicit map, so unmapped/future columns still render
+    reasonably instead of raising or being left as a bare code.
+    """
+    if name in FEATURE_LABELS:
+        return FEATURE_LABELS[name]
+    label = str(name).replace('_', ' ').strip()
+    return (label[:1].upper() + label[1:]) if label else str(name)
+
+
 @dataclass
 class FigureGenerator:
     """
@@ -419,7 +490,7 @@ class FigureGenerator:
         # Sort by importance and take top k
         sorted_importance = sorted(importance.items(), key=lambda x: abs(x[1]), reverse=True)[:top_k]
 
-        features = [f[0] for f in sorted_importance]
+        features = [_friendly_feature_name(f[0]) for f in sorted_importance]
         values = [f[1] for f in sorted_importance]
 
         # Reverse for horizontal bar chart
@@ -594,7 +665,7 @@ class FigureGenerator:
             ax.scatter(sv_col, y_jitter, c=colour_vals, cmap=cmap,
                        alpha=0.55, s=12, vmin=0, vmax=1)
 
-        feat_labels = [feature_names[i] for i in top_idx]
+        feat_labels = [_friendly_feature_name(feature_names[i]) for i in top_idx]
         ax.set_yticks(range(len(top_idx)))
         ax.set_yticklabels(feat_labels, fontsize=9)
         ax.axvline(0, color="black", linewidth=0.8, linestyle="--")
@@ -663,7 +734,8 @@ class FigureGenerator:
                         label="High-risk class", color="#DD8452", alpha=0.85)
 
         ax.set_xticks(x)
-        ax.set_xticklabels(top_features, rotation=40, ha="right", fontsize=9)
+        ax.set_xticklabels([_friendly_feature_name(f) for f in top_features],
+                           rotation=40, ha="right", fontsize=9)
         ax.set_ylabel("Mean |SHAP value|")
         ax.set_title("SHAP Feature Importance: Global vs High-Risk Class")
         ax.legend()
@@ -752,6 +824,9 @@ class FigureGenerator:
             color_vals = X[:, color_feat_idx]
             color_name = feature_names[color_feat_idx] if color_feat_idx < len(feature_names) else "other"
 
+            feat_label = _friendly_feature_name(feat_name)
+            color_label = _friendly_feature_name(color_name)
+
             # Normalise colour
             c_min, c_max = color_vals.min(), color_vals.max()
             if c_max > c_min:
@@ -762,10 +837,10 @@ class FigureGenerator:
             sc = ax.scatter(x_vals, shap_col, c=c_norm, cmap="RdBu_r",
                             alpha=0.6, s=15, vmin=0, vmax=1)
             ax.axhline(0, color="black", linewidth=0.7, linestyle="--")
-            ax.set_xlabel(feat_name, fontsize=10)
-            ax.set_ylabel(f"SHAP({feat_name})", fontsize=9)
-            ax.set_title(f"Dependence: {feat_name}", fontsize=10)
-            plt.colorbar(sc, ax=ax).set_label(color_name, fontsize=8)
+            ax.set_xlabel(feat_label, fontsize=10)
+            ax.set_ylabel(f"SHAP({feat_label})", fontsize=9)
+            ax.set_title(f"Dependence: {feat_label}", fontsize=10)
+            plt.colorbar(sc, ax=ax).set_label(color_label, fontsize=8)
 
         # Hide unused axes
         for plot_i in range(len(top_idx), nrows * ncols):
@@ -821,9 +896,9 @@ class FigureGenerator:
                     np.mean(np.abs(shap_values[:, f_idx, c_idx]))
                 )
 
-        feat_labels = [feature_names[i] for i in top_idx]
+        feat_labels = [_friendly_feature_name(feature_names[i]) for i in top_idx]
 
-        fig, ax = plt.subplots(figsize=(max(8, n_classes * 1.2), max(6, top_k * 0.5)))
+        fig, ax = plt.subplots(figsize=(max(10, n_classes * 1.2), max(6, top_k * 0.5)))
 
         if SEABORN_AVAILABLE:
             import seaborn as sns
