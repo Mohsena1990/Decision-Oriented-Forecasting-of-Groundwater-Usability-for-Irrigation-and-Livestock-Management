@@ -84,7 +84,8 @@ def savefig(fig, out_dir: Path, name: str):
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f'{name}.png'
     fig.savefig(path, dpi=150, bbox_inches='tight')
-    logger.info(f'Saved → {path}')
+    fig.savefig(out_dir / f'{name}.pdf', bbox_inches='tight')
+    logger.info(f'Saved → {path} (+ .pdf)')
     plt.close(fig)
 
 

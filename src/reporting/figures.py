@@ -80,6 +80,13 @@ class FigureGenerator:
             except:
                 plt.style.use('default')
 
+    def _savefig(self, path: Path) -> None:
+        """Save the current matplotlib figure as both PNG (raster, dpi=self.dpi)
+        and PDF (vector, LaTeX-ready) at the same base filename."""
+        path = Path(path)
+        plt.savefig(path, dpi=self.dpi, bbox_inches='tight')
+        plt.savefig(path.with_suffix('.pdf'), bbox_inches='tight')
+
     def f2_class_distribution(
         self,
         data: Dict[int, pd.DataFrame],
@@ -124,7 +131,7 @@ class FigureGenerator:
         plt.tight_layout()
 
         output_path = self.output_dir / "F2_class_distribution.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(output_path)
         plt.close()
 
         logger.info(f"Saved F2 to {output_path}")
@@ -176,7 +183,7 @@ class FigureGenerator:
         ax.set_title('Temporal Forward Forecasting Setup', fontsize=14)
 
         output_path = self.output_dir / "F3_temporal_schematic.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(output_path)
         plt.close()
 
         logger.info(f"Saved F3 to {output_path}")
@@ -268,7 +275,7 @@ class FigureGenerator:
         plt.tight_layout()
 
         output_path = self.output_dir / "F4_model_comparison.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(output_path)
         plt.close()
 
         logger.info(f"Saved F4 to {output_path}")
@@ -322,7 +329,7 @@ class FigureGenerator:
         ax.grid(True, alpha=0.3)
 
         output_path = self.output_dir / "F5_pareto_fronts.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(output_path)
         plt.close()
 
         logger.info(f"Saved F5 to {output_path}")
@@ -384,7 +391,7 @@ class FigureGenerator:
         plt.tight_layout()
 
         output_path = self.output_dir / "F6_vikor_rankings.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(output_path)
         plt.close()
 
         logger.info(f"Saved F6 to {output_path}")
@@ -431,7 +438,7 @@ class FigureGenerator:
         plt.tight_layout()
 
         output_path = self.output_dir / "F7_shap_summary.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(output_path)
         plt.close()
 
         logger.info(f"Saved F7 to {output_path}")
@@ -471,7 +478,7 @@ class FigureGenerator:
         plt.tight_layout()
 
         output_path = self.output_dir / "F8_scenario_impact.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(output_path)
         plt.close()
 
         logger.info(f"Saved F8 to {output_path}")
@@ -511,7 +518,7 @@ class FigureGenerator:
         ax.set_title('Spatial Distribution of Groundwater Quality Risk')
 
         output_path = self.output_dir / "F9_spatial_risk_map.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(output_path)
         plt.close()
 
         logger.info(f"Saved F9 to {output_path}")
@@ -604,7 +611,7 @@ class FigureGenerator:
 
         plt.tight_layout()
         output_path = self.output_dir / "F7b_shap_beeswarm.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved F7b to {output_path}")
         return output_path
@@ -664,7 +671,7 @@ class FigureGenerator:
 
         plt.tight_layout()
         output_path = self.output_dir / "F7c_shap_class_comparison.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved F7c to {output_path}")
         return output_path
@@ -768,7 +775,7 @@ class FigureGenerator:
         plt.suptitle("SHAP Dependence Plots — Top Features", fontsize=13, y=1.01)
         plt.tight_layout()
         output_path = self.output_dir / "F7d_shap_dependence.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved F7d to {output_path}")
         return output_path
@@ -836,7 +843,7 @@ class FigureGenerator:
         ax.set_title("SHAP Feature Importance per Class", fontsize=13)
         plt.tight_layout()
         output_path = self.output_dir / "F7e_shap_class_heatmap.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved F7e to {output_path}")
         return output_path
@@ -969,7 +976,7 @@ class FigureGenerator:
 
         plt.tight_layout()
         output_path = self.output_dir / "F4b_confusion_matrix.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved F4b to {output_path}")
         return output_path
@@ -1026,7 +1033,7 @@ class FigureGenerator:
 
         plt.tight_layout()
         output_path = self.output_dir / "F4c_per_class_metrics.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved F4c to {output_path}")
         return output_path
@@ -1090,7 +1097,7 @@ class FigureGenerator:
 
         plt.tight_layout()
         output_path = self.output_dir / "F4d_severity_comparison.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved F4d to {output_path}")
         return output_path
@@ -1252,7 +1259,7 @@ flowchart TB
 
         plt.tight_layout()
         output_path = self.output_dir / "F_roc_curves.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved ROC curves to {output_path}")
         return output_path
@@ -1301,7 +1308,7 @@ flowchart TB
 
         plt.tight_layout()
         output_path = self.output_dir / "F_pr_curves.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved PR curves to {output_path}")
         return output_path
@@ -1350,7 +1357,7 @@ flowchart TB
 
         plt.tight_layout()
         output_path = self.output_dir / "F_learning_curves.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved learning curves to {output_path}")
         return output_path
@@ -1478,7 +1485,7 @@ flowchart TB
 
         plt.tight_layout()
         p = self.output_dir / "F8a_scenario_risk_change.png"
-        plt.savefig(p, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(p)
         plt.close()
         paths.append(p)
         logger.info(f"Saved F8a to {p}")
@@ -1524,7 +1531,7 @@ flowchart TB
                 ax.set_title(f"F8c — Class Transition Matrix\n(Scenario: {max_name})")
                 plt.tight_layout()
                 p = self.output_dir / "F8c_transition_matrix.png"
-                plt.savefig(p, dpi=self.dpi, bbox_inches='tight')
+                self._savefig(p)
                 plt.close()
                 paths.append(p)
                 logger.info(f"Saved F8c to {p}")
@@ -1597,7 +1604,7 @@ flowchart TB
 
         plt.tight_layout()
         output_path = self.output_dir / "F9_imbalance_handling.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved F9 to {output_path}")
         return output_path
@@ -1818,7 +1825,7 @@ flowchart TB
 
         plt.tight_layout()
         output_path = self.output_dir / "F_era5_climate_analysis.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved ERA5 figure to {output_path}")
         return output_path
@@ -2148,7 +2155,7 @@ flowchart TB
         )
 
         output_path = self.output_dir / "F_era5_shap_spatial.png"
-        plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight')
+        self._savefig(output_path)
         plt.close()
         logger.info(f"Saved ERA5+SHAP spatial figure to {output_path}")
         return output_path
